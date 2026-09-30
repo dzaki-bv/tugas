@@ -85,6 +85,25 @@ function parseUrls(value) {
   try { const parsed = JSON.parse(value); return Array.isArray(parsed) ? parsed : [value]; }
   catch { return [value]; }
 }
+function fileBytes(urls) {
+  let bytes = 0;
+  for (const value of urls) {
+    try { bytes += statSync(storageFile(value)).size; }
+    catch { /* Missing files are excluded from usage. */ }
+  }
+  return bytes;
+}
+function teacherFileUrls(teacherId) {
+  const urls = [];
+  for (const task of db.prepare('SELECT file_url FROM tasks WHERE teacher_id=?').all(teacherId)) urls.push(...parseUrls(task.file_url));
+  for (const sub of db.prepare('SELECT file_url FROM submissions WHERE task_id IN (SELECT id FROM tasks WHERE teacher_id=?)').all(teacherId)) urls.push(...parseUrls(sub.file_url));
+  return urls;
+}
+const teacherUsageBytes = teacherId => fileBytes(teacherFileUrls(teacherId));
+const storageLimitBytes = () => {
+  const configured = Number(process.env.STORAGE_LIMIT_BYTES);
+  return Number.isFinite(configured) && configured > 0 ? configured : 10 * 1024 ** 3;
+};
 function taskFor(row) {
   return { ...row, classes: db.prepare('SELECT c.id, c.name, (SELECT COUNT(*) FROM students s WHERE s.class_id=c.id) AS student_count FROM classes c JOIN task_classes tc ON tc.class_id=c.id WHERE tc.task_id=? ORDER BY c.name').all(row.id) };
 }
@@ -173,6 +192,7 @@ app.post('/api/tasks', requireTeacher, upload.single('file'), (req, res) => {
   do { code = String(randomInt(0, 1000000)).padStart(6, '0'); }
   while (db.prepare('SELECT id FROM tasks WHERE task_code=?').get(code));
   const id = randomUUID();
+  if (req.file && teacherUsageBytes(req.teacher.id) + req.file.size > storageLimitBytes()) return fail(res, 413, 'Kapasitas penyimpanan sudah penuh.');
   const fileUrl = req.file ? saveFile(req, req.file, ['tasks', id]) : null;
   db.prepare('INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?,?,?)').run(id, req.teacher.id, title.trim(), subject.trim(), String(description).trim(), deadline, submission_type, code, fileUrl, now());
   for (const classId of classes) db.prepare('INSERT INTO task_classes VALUES (?,?)').run(id, classId);
@@ -227,7 +247,11 @@ app.post('/api/submissions', upload.any(), (req, res) => {
     audio: new Set(['.mp3', '.m4a', '.aac', '.ogg', '.wav', '.flac', '.webm']),
   };
   if (files.some(file => !file.mimetype.startsWith(`${task.submission_type}/`) && !extensions[task.submission_type].has(extname(file.originalname).toLowerCase()))) return fail(res, 400, 'Jenis file tidak sesuai dengan tugas.');
+  if (task.submission_type === 'image' && files.some(file => file.size > 50 * 1024 ** 2)) return fail(res, 413, 'Foto maksimal 50 MB per file.');
   const previous = db.prepare('SELECT * FROM submissions WHERE task_id=? AND lower(student_name)=lower(?) AND lower(student_class)=lower(?)').get(task.id, studentName, studentClass);
+  const incomingBytes = files.reduce((sum, file) => sum + file.size, 0);
+  const replacedBytes = previous ? fileBytes(parseUrls(previous.file_url)) : 0;
+  if (teacherUsageBytes(task.teacher_id) - replacedBytes + incomingBytes > storageLimitBytes()) return fail(res, 413, 'Kapasitas penyimpanan sudah penuh.');
   const status = Date.now() > new Date(task.deadline).getTime() ? 'Terlambat' : 'Tepat Waktu';
   const urls = files.map(file => saveFile(req, file, ['submissions', task.id, studentClass, status]));
   if (previous) { removeUrls(previous.file_url); db.prepare('DELETE FROM submissions WHERE id=?').run(previous.id); }
@@ -237,21 +261,15 @@ app.post('/api/submissions', upload.any(), (req, res) => {
 });
 
 app.get('/api/storage/usage', requireTeacher, (req, res) => {
-  const urls = [];
-  for (const task of db.prepare('SELECT file_url FROM tasks WHERE teacher_id=?').all(req.teacher.id)) urls.push(...parseUrls(task.file_url));
-  for (const sub of db.prepare('SELECT file_url FROM submissions WHERE task_id IN (SELECT id FROM tasks WHERE teacher_id=?)').all(req.teacher.id)) urls.push(...parseUrls(sub.file_url));
-  let bytes = 0;
-  for (const value of urls) {
-    try { bytes += statSync(storageFile(value)).size; }
-    catch { /* Missing files are excluded from usage. */ }
-  }
-  res.json({ used_bytes: bytes });
+  res.json({ used_bytes: teacherUsageBytes(req.teacher.id) });
 });
 app.get('/api/files/blob', requireTeacher, (req, res) => {
   let file;
+  const requestedUrl = String(req.query.url);
   try {
-    file = storageFile(String(req.query.url));
+    file = storageFile(requestedUrl);
   } catch { return fail(res, 400, 'URL file tidak valid.'); }
+  if (!teacherFileUrls(req.teacher.id).includes(requestedUrl)) return fail(res, 404, 'File tidak ditemukan.');
   if (!existsSync(file)) return fail(res, 404, 'File tidak ditemukan.');
   res.sendFile(file);
 });

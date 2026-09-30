@@ -17,7 +17,7 @@ Isi `ADMIN_SETUP_KEY` di `.env` dengan nilai acak yang kuat. Untuk membuat guru 
 npm test
 ```
 
-`PORT`, `DATA_DIR`, dan `PUBLIC_ORIGIN` dapat diatur melalui lingkungan. `PUBLIC_ORIGIN` diperlukan jika server berada di balik proxy dengan domain lain agar URL berkas dan tautan siswa memakai alamat yang benar. Folder `data/`, `.env`, dan unduhan ZIP diabaikan Git.
+`PORT`, `DATA_DIR`, dan `PUBLIC_ORIGIN` dapat diatur melalui lingkungan. `PUBLIC_ORIGIN` diperlukan jika server berada di balik proxy dengan domain lain agar URL berkas dan tautan siswa memakai alamat yang benar. Kapasitas penyimpanan per guru adalah 10 GB, sesuai indikator di dasbor; `STORAGE_LIMIT_BYTES` tersedia untuk pengujian batas dengan nilai kecil. Folder `data/`, `.env`, dan unduhan ZIP diabaikan Git.
 
 ## Fitur dan alur yang dipetakan
 
@@ -37,7 +37,7 @@ npm test
 - Form siswa mengirim `POST /api/submissions` sebagai `multipart/form-data`: `task_code`, `task_id`, `student_name`, `student_class`, `student_note` opsional, lalu `file_0`, `file_1`, dan seterusnya.
 - Gambar dibatasi 50 MB sebelum diproses; gambar besar diperkecil hingga sisi terpanjang 1200 px dan dapat menjadi JPEG. Video dan audio dibatasi 100 MB. Audio rekaman maksimal 10 menit; file audio yang diunggah dapat dikonversi ke MP3 di browser. Format HEIC/HEIF ditolak. Antarmuka siswa menyarankan HP untuk kamera/mikrofon.
 - Pada produksi, lampiran soal teramati di host R2 publik `pub-f215…r2.dev` dan audio siswa di host R2 publik lain `pub-1ae…r2.dev`. Nama objek yang terlihat mengikuti pola `timestamp_acak_nama-asli.ext` tanpa folder status pada URL yang teramati. Pemisahan `Tepat Waktu` dan `Terlambat` pasti ada pada tampilan guru dan ZIP unduhan; susunan internal bucket R2 tidak dapat diverifikasi dari URL publik.
-- Pada replika, metadata guru, kelas, siswa, tugas, sesi, dan kiriman disimpan di `data/tugas.sqlite`. Berkas disimpan secara fisik di `data/files/tasks/<id-tugas>/<timestamp>_<acak>_<nama-asli>` untuk lampiran dan `data/files/submissions/<id-tugas>/<kelas>/Tepat Waktu|Terlambat/<timestamp>_<acak>_<nama-asli>` untuk kiriman. Unggahan dialirkan dahulu ke `data/uploads/`, lalu dipindah setelah validasi. URL unduh memakai `/files/...`; unduhan guru melalui `/api/files/blob?url=…` membutuhkan token. Berkas lama dari versi replika pertama dengan lokasi langsung di `data/files/` tetap dapat dibaca.
+- Pada replika, metadata guru, kelas, siswa, tugas, sesi, dan kiriman disimpan di `data/tugas.sqlite`. Berkas disimpan secara fisik di `data/files/tasks/<id-tugas>/<timestamp>_<acak>_<nama-asli>` untuk lampiran dan `data/files/submissions/<id-tugas>/<kelas>/Tepat Waktu|Terlambat/<timestamp>_<acak>_<nama-asli>` untuk kiriman. Unggahan dialirkan dahulu ke `data/uploads/`, lalu dipindah setelah validasi. Gambar lebih dari 50 MB per file dan unggahan yang melewati kapasitas 10 GB ditolak oleh API. URL berkas `/files/...` dapat diakses siapa pun yang mengetahui tautannya, seperti URL R2 publik pada aplikasi asal. Jalur unduh guru `/api/files/blob?url=…` hanya menerima token guru pemilik berkas. Berkas lama dari versi replika pertama dengan lokasi langsung di `data/files/` tetap dapat dibaca.
 
 ### Unduh
 
