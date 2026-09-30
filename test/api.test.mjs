@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -10,10 +10,12 @@ test('teacher, class, task, student upload, replacement, file download, deletion
   process.env.DATA_DIR = dir;
   process.env.TEACHER_EMAIL = 'teacher@example.test';
   process.env.TEACHER_PASSWORD = 'strong-test-password';
+  process.env.ADMIN_SETUP_KEY = 'local-admin-test-key';
   const { app, db } = await import('../server.mjs');
   const server = app.listen(0);
   await new Promise(resolve => server.once('listening', resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
+  const storedFile = url => join(dir, 'files', decodeURIComponent(new URL(url).pathname.slice('/files/'.length)));
   let token;
   async function api(path, options = {}) {
     const headers = { ...(options.headers || {}) };
@@ -33,7 +35,7 @@ test('teacher, class, task, student upload, replacement, file download, deletion
     const taskForm = new FormData();
     taskForm.set('title', 'Tugas Audio');
     taskForm.set('subject', 'Bahasa');
-    taskForm.set('deadline', '2026-12-31 12:00');
+    taskForm.set('deadline', new Date(Date.now() + 365 * 86400000).toISOString());
     taskForm.set('submission_type', 'audio');
     taskForm.set('classes', JSON.stringify([classId]));
     taskForm.set('file', new Blob(['soal'], { type: 'text/plain' }), 'soal.txt');
@@ -58,16 +60,47 @@ test('teacher, class, task, student upload, replacement, file download, deletion
     const first = await submit('audio-first');
     assert.equal(first.status, 201);
     assert.equal(first.body.replaced, false);
+    assert.match(decodeURIComponent(first.body.file_urls[0]), /\/submissions\/[^/]+\/IX\.1\/Tepat Waktu\//);
+    assert.equal(existsSync(storedFile(first.body.file_urls[0])), true);
     const replacement = await submit('audio-second');
     assert.equal(replacement.body.replaced, true);
+    assert.equal(existsSync(storedFile(first.body.file_urls[0])), false);
+    assert.equal(existsSync(storedFile(replacement.body.file_urls[0])), true);
     const listed = await api(`/api/tasks/${taskId}/submissions`);
     assert.equal(listed.body.submissions.length, 1);
     const file = await fetch(base + `/api/files/blob?url=${encodeURIComponent(replacement.body.file_urls[0])}`, { headers: { Authorization: `Bearer ${token}` } });
     assert.equal(await file.text(), 'audio-second');
     const usage = await api('/api/storage/usage');
     assert.ok(usage.body.used_bytes > 0);
+    const lateTaskForm = new FormData();
+    lateTaskForm.set('title', 'Tugas Telat');
+    lateTaskForm.set('subject', 'Bahasa');
+    lateTaskForm.set('deadline', '2020-01-01 00:00');
+    lateTaskForm.set('submission_type', 'audio');
+    lateTaskForm.set('classes', JSON.stringify([classId]));
+    const lateTask = await api('/api/tasks', { method: 'POST', body: lateTaskForm });
+    const lateForm = new FormData();
+    lateForm.set('task_id', lateTask.body.task.id);
+    lateForm.set('task_code', lateTask.body.task.task_code);
+    lateForm.set('student_name', 'Siswa Uji');
+    lateForm.set('student_class', 'IX.1');
+    lateForm.set('file_0', new Blob(['late-audio'], { type: 'audio/mpeg' }), 'telat.mp3');
+    const late = await api('/api/submissions', { method: 'POST', body: lateForm });
+    assert.equal(late.status, 201);
+    assert.match(decodeURIComponent(late.body.file_urls[0]), /\/submissions\/[^/]+\/IX\.1\/Terlambat\//);
+    assert.equal(existsSync(storedFile(late.body.file_urls[0])), true);
     assert.equal((await api(`/api/tasks/${taskId}`, { method: 'DELETE' })).status, 200);
+    assert.equal((await api(`/api/tasks/${lateTask.body.task.id}`, { method: 'DELETE' })).status, 200);
+    assert.equal(existsSync(storedFile(replacement.body.file_urls[0])), false);
+    assert.equal(existsSync(storedFile(late.body.file_urls[0])), false);
     assert.equal((await api(`/api/tasks/${taskId}`)).status, 404);
+    assert.equal((await api('/api/admin/teachers', { headers: { 'X-Admin-Key': 'wrong-key' } })).status, 401);
+    const adminHeaders = { 'X-Admin-Key': 'local-admin-test-key' };
+    const addedTeacher = await api('/api/admin/teachers', { method: 'POST', headers: { ...adminHeaders, 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'second@example.test', password: 'another-test-password' }) });
+    assert.equal(addedTeacher.status, 201);
+    assert.equal((await api('/api/admin/teachers', { headers: adminHeaders })).body.teachers.length, 2);
+    assert.equal((await api(`/api/admin/teachers/${addedTeacher.body.teacher.id}`, { method: 'DELETE', headers: adminHeaders })).status, 200);
+    assert.equal((await api('/api/admin/teachers', { headers: adminHeaders })).body.teachers.length, 1);
   } finally {
     await new Promise(resolve => server.close(resolve));
     db.close();

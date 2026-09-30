@@ -5,7 +5,7 @@ import bcrypt from 'bcryptjs';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomBytes, randomInt, randomUUID, timingSafeEqual } from 'node:crypto';
 import { mkdirSync, readFileSync, renameSync, unlinkSync, existsSync, statSync } from 'node:fs';
-import { join, resolve, extname, basename } from 'node:path';
+import { join, resolve, extname, basename, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('.', import.meta.url));
@@ -55,20 +55,27 @@ const hash = value => createHash('sha256').update(value).digest('hex');
 const fail = (res, status, error) => res.status(status).json({ error });
 const origin = req => process.env.PUBLIC_ORIGIN || `${req.protocol}://${req.get('host')}`;
 const cleanName = name => basename(name || 'file').replace(/[^a-zA-Z0-9._-]/g, '_').slice(-100);
+const cleanFolder = name => String(name || 'Tanpa Kelas').replace(/[\\/:*?"<>|]/g, '_').trim().slice(0, 80) || 'Tanpa Kelas';
 const fileKey = file => `${Date.now()}_${randomBytes(4).toString('hex')}_${cleanName(file.originalname)}`;
-function saveFile(req, file) {
-  const key = fileKey(file);
-  renameSync(file.path, join(filesDir, key));
-  return `${origin(req)}/files/${encodeURIComponent(key)}`;
+function storageFile(urlValue) {
+  const url = new URL(urlValue);
+  if (!url.pathname.startsWith('/files/')) throw new Error('Invalid file URL');
+  const relative = decodeURIComponent(url.pathname.slice(7));
+  const absolute = resolve(filesDir, relative);
+  if (!absolute.startsWith(filesDir + sep)) throw new Error('Invalid file path');
+  return absolute;
+}
+function saveFile(req, file, folders = []) {
+  const relative = [...folders.map(cleanFolder), fileKey(file)];
+  const destination = join(filesDir, ...relative);
+  mkdirSync(resolve(destination, '..'), { recursive: true });
+  renameSync(file.path, destination);
+  return `${origin(req)}/files/${relative.map(encodeURIComponent).join('/')}`;
 }
 function removeUrls(urls) {
   for (const value of parseUrls(urls)) {
     try {
-      const url = new URL(value);
-      if (!url.pathname.startsWith('/files/')) continue;
-      const key = decodeURIComponent(url.pathname.slice(7));
-      if (key !== basename(key)) continue;
-      const file = join(filesDir, key);
+      const file = storageFile(value);
       if (existsSync(file)) unlinkSync(file);
     } catch { /* Old external files are not stored here. */ }
   }
@@ -166,7 +173,7 @@ app.post('/api/tasks', requireTeacher, upload.single('file'), (req, res) => {
   do { code = String(randomInt(0, 1000000)).padStart(6, '0'); }
   while (db.prepare('SELECT id FROM tasks WHERE task_code=?').get(code));
   const id = randomUUID();
-  const fileUrl = req.file ? saveFile(req, req.file) : null;
+  const fileUrl = req.file ? saveFile(req, req.file, ['tasks', id]) : null;
   db.prepare('INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?,?,?)').run(id, req.teacher.id, title.trim(), subject.trim(), String(description).trim(), deadline, submission_type, code, fileUrl, now());
   for (const classId of classes) db.prepare('INSERT INTO task_classes VALUES (?,?)').run(id, classId);
   res.status(201).json({ task: taskById(id) });
@@ -221,7 +228,8 @@ app.post('/api/submissions', upload.any(), (req, res) => {
   };
   if (files.some(file => !file.mimetype.startsWith(`${task.submission_type}/`) && !extensions[task.submission_type].has(extname(file.originalname).toLowerCase()))) return fail(res, 400, 'Jenis file tidak sesuai dengan tugas.');
   const previous = db.prepare('SELECT * FROM submissions WHERE task_id=? AND lower(student_name)=lower(?) AND lower(student_class)=lower(?)').get(task.id, studentName, studentClass);
-  const urls = files.map(file => saveFile(req, file));
+  const status = Date.now() > new Date(task.deadline).getTime() ? 'Terlambat' : 'Tepat Waktu';
+  const urls = files.map(file => saveFile(req, file, ['submissions', task.id, studentClass, status]));
   if (previous) { removeUrls(previous.file_url); db.prepare('DELETE FROM submissions WHERE id=?').run(previous.id); }
   const fileUrl = urls.length === 1 ? urls[0] : JSON.stringify(urls);
   db.prepare('INSERT INTO submissions VALUES (?,?,?,?,?,?,?)').run(randomUUID(), task.id, studentName, studentClass, String(req.body?.student_note || '').trim(), fileUrl, now());
@@ -234,20 +242,16 @@ app.get('/api/storage/usage', requireTeacher, (req, res) => {
   for (const sub of db.prepare('SELECT file_url FROM submissions WHERE task_id IN (SELECT id FROM tasks WHERE teacher_id=?)').all(req.teacher.id)) urls.push(...parseUrls(sub.file_url));
   let bytes = 0;
   for (const value of urls) {
-    try { const key = decodeURIComponent(new URL(value).pathname.slice(7)); if (key === basename(key)) bytes += statSync(join(filesDir, key)).size; }
+    try { bytes += statSync(storageFile(value)).size; }
     catch { /* Missing files are excluded from usage. */ }
   }
   res.json({ used_bytes: bytes });
 });
 app.get('/api/files/blob', requireTeacher, (req, res) => {
-  let key;
+  let file;
   try {
-    const url = new URL(String(req.query.url));
-    if (!url.pathname.startsWith('/files/')) throw new Error();
-    key = decodeURIComponent(url.pathname.slice(7));
-    if (key !== basename(key)) throw new Error();
+    file = storageFile(String(req.query.url));
   } catch { return fail(res, 400, 'URL file tidak valid.'); }
-  const file = join(filesDir, key);
   if (!existsSync(file)) return fail(res, 404, 'File tidak ditemukan.');
   res.sendFile(file);
 });
