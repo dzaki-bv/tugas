@@ -1,0 +1,76 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+test('teacher, class, task, student upload, replacement, file download, deletion', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tugas-api-'));
+  process.env.NODE_ENV = 'test';
+  process.env.DATA_DIR = dir;
+  process.env.TEACHER_EMAIL = 'teacher@example.test';
+  process.env.TEACHER_PASSWORD = 'strong-test-password';
+  const { app, db } = await import('../server.mjs');
+  const server = app.listen(0);
+  await new Promise(resolve => server.once('listening', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  let token;
+  async function api(path, options = {}) {
+    const headers = { ...(options.headers || {}) };
+    if (token) headers.Authorization = `Bearer ${token}`;
+    const response = await fetch(base + path, { ...options, headers });
+    const body = await response.json();
+    return { status: response.status, body };
+  }
+  try {
+    const login = await api('/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'teacher@example.test', password: 'strong-test-password' }) });
+    assert.equal(login.status, 200);
+    token = login.body.token;
+    const classroom = await api('/api/classes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'IX.1' }) });
+    assert.equal(classroom.status, 201);
+    const classId = classroom.body.class.id;
+    await api(`/api/classes/${classId}/students`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ names: ['Siswa Uji'] }) });
+    const taskForm = new FormData();
+    taskForm.set('title', 'Tugas Audio');
+    taskForm.set('subject', 'Bahasa');
+    taskForm.set('deadline', '2026-12-31 12:00');
+    taskForm.set('submission_type', 'audio');
+    taskForm.set('classes', JSON.stringify([classId]));
+    taskForm.set('file', new Blob(['soal'], { type: 'text/plain' }), 'soal.txt');
+    const created = await api('/api/tasks', { method: 'POST', body: taskForm });
+    assert.equal(created.status, 201);
+    assert.match(created.body.task.task_code, /^\d{6}$/);
+    assert.equal(created.body.task.classes[0].name, 'IX.1');
+    const taskId = created.body.task.id;
+    const publicTask = await api(`/api/tasks/code/${created.body.task.task_code}`);
+    assert.equal(publicTask.body.task.title, 'Tugas Audio');
+    const students = await api(`/api/tasks/code/${created.body.task.task_code}/classes/${classId}/students`);
+    assert.equal(students.body.students[0].name, 'Siswa Uji');
+    const submit = async content => {
+      const form = new FormData();
+      form.set('task_id', taskId);
+      form.set('task_code', created.body.task.task_code);
+      form.set('student_name', 'Siswa Uji');
+      form.set('student_class', 'IX.1');
+      form.set('file_0', new Blob([content], { type: 'audio/mpeg' }), 'rekaman.mp3');
+      return api('/api/submissions', { method: 'POST', body: form });
+    };
+    const first = await submit('audio-first');
+    assert.equal(first.status, 201);
+    assert.equal(first.body.replaced, false);
+    const replacement = await submit('audio-second');
+    assert.equal(replacement.body.replaced, true);
+    const listed = await api(`/api/tasks/${taskId}/submissions`);
+    assert.equal(listed.body.submissions.length, 1);
+    const file = await fetch(base + `/api/files/blob?url=${encodeURIComponent(replacement.body.file_urls[0])}`, { headers: { Authorization: `Bearer ${token}` } });
+    assert.equal(await file.text(), 'audio-second');
+    const usage = await api('/api/storage/usage');
+    assert.ok(usage.body.used_bytes > 0);
+    assert.equal((await api(`/api/tasks/${taskId}`, { method: 'DELETE' })).status, 200);
+    assert.equal((await api(`/api/tasks/${taskId}`)).status, 404);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
