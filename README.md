@@ -1,6 +1,6 @@
-# Sistem Tugas — replika mandiri
+# Sistem Tugas
 
-Replika aplikasi di `https://tugas-app.pages.dev/` dalam satu repo. Tampilan React dan aset yang terbit pada 30 September 2026 disalin dari deploy publik, lalu URL API diarahkan ke server dalam repo ini. API pengganti memakai SQLite dan berkas lokal; data produksi tidak disalin ke Git.
+Tampilan React dan aset aplikasi asal `https://tugas-app.pages.dev/` disalin dari deploy publik, lalu URL API diarahkan ke origin yang sama. Deployment baru ada di `https://tugas.dzaki-fird.workers.dev/`, memakai `worker.mjs` dengan D1 dan R2 di akun Cloudflare tujuan. `server.mjs` tetap tersedia sebagai replika lokal berbasis SQLite dan berkas lokal. Data produksi tidak disalin ke Git.
 
 ## Menjalankan
 
@@ -17,7 +17,7 @@ Isi `ADMIN_SETUP_KEY` di `.env` dengan nilai acak yang kuat. Untuk membuat guru 
 npm test
 ```
 
-`PORT`, `DATA_DIR`, dan `PUBLIC_ORIGIN` dapat diatur melalui lingkungan. `PUBLIC_ORIGIN` diperlukan jika server berada di balik proxy dengan domain lain agar URL berkas dan tautan siswa memakai alamat yang benar. Kapasitas penyimpanan per guru adalah 10 GB, sesuai indikator di dasbor; `STORAGE_LIMIT_BYTES` tersedia untuk pengujian batas dengan nilai kecil. Folder `data/`, `.env`, dan unduhan ZIP diabaikan Git.
+`PORT` dan `DATA_DIR` dapat diatur melalui lingkungan. URL berkas disimpan relatif (`/files/...`), sehingga tidak bergantung pada header `Host` maupun domain proxy. Kapasitas penyimpanan per guru adalah 10 GB, sesuai indikator di dasbor; `STORAGE_LIMIT_BYTES` tersedia untuk pengujian batas dengan nilai kecil. Folder `data/`, `.env`, dan unduhan ZIP diabaikan Git.
 
 ## Fitur dan alur yang dipetakan
 
@@ -25,7 +25,7 @@ npm test
 | --- | --- |
 | Beranda | Siswa mencari tugas dengan kode 6 digit; guru login dengan email dan password. |
 | Dasbor guru | Menampilkan kuota 10 GB, daftar tugas, buat tugas, unduh semua tugas, hapus semua tugas. |
-| Kelas | Buat, ubah nama, dan hapus kelas; masukkan banyak nama siswa sekaligus (satu per baris), hapus siswa. |
+| Kelas | Buat, ubah nama, dan hapus kelas; seluruh nama siswa ditampilkan dalam satu kotak teks (satu per baris). Tombol **Simpan daftar** menambah nama baru dan menghapus nama yang dihilangkan dari kotak. |
 | Buat tugas | Judul, mata pelajaran, deadline, deskripsi opsional, jenis kiriman gambar/video/audio, target satu atau beberapa kelas, lampiran soal opsional. Tanpa target kelas, formulir siswa menerima kelas dan nama bebas. |
 | Detail tugas | Kode dan tautan siswa, QR, lampiran soal, total pengumpulan, tepat waktu, terlambat, belum mengumpulkan, filter kelas, pratinjau, unduh per siswa dan massal, hapus tugas. Tombol **Lihat Semua** membuka satu halaman gulir berisi seluruh kiriman: dikelompokkan menurut nama siswa dan kelas, lalu setiap lembar foto diberi `Halaman i dari n`. Video dan audio tampil dengan pemutar dan urutan file. |
 | Pengumpulan siswa | Pilih kelas dan nama dari daftar target, tambahkan hingga 20 berkas, tulis catatan opsional, kirim. Pengiriman ulang untuk nama dan kelas yang sama mengganti pengumpulan sebelumnya. Kiriman setelah deadline tetap diterima dan diberi status terlambat. |
@@ -34,7 +34,7 @@ npm test
 ### Unggah dan penyimpanan
 
 - Frontend produksi mengirim `POST /api/tasks` sebagai `multipart/form-data` untuk tugas, termasuk lampiran `file` bila ada.
-- Form siswa mengirim `POST /api/submissions` sebagai `multipart/form-data`: `task_code`, `task_id`, `student_name`, `student_class`, `student_note` opsional, lalu `file_0`, `file_1`, dan seterusnya.
+- Form siswa mengirim `POST /api/submissions` sebagai `multipart/form-data`: `task_code`, `task_id`, `student_name`, `class_id` (wajib jika tugas memiliki kelas) atau `student_class` (untuk tugas tanpa kelas), `student_note` opsional, lalu `file_0`, `file_1`, dan seterusnya. Setiap berkas harus berekstensi dari daftar izin tipe tugas; jika ekstensinya tidak dikenal tetapi MIME-nya cocok, ekstensi yang sesuai ditambahkan. Berkas disajikan dengan `nosniff`, dan tipe selain gambar, audio, video, PDF, dan teks diunduh sebagai lampiran.
 - Gambar dibatasi 50 MB sebelum diproses; gambar besar diperkecil hingga sisi terpanjang 1200 px dan dapat menjadi JPEG. Video dan audio dibatasi 100 MB. Audio rekaman maksimal 10 menit; file audio yang diunggah dapat dikonversi ke MP3 di browser. Format HEIC/HEIF ditolak. Antarmuka siswa menyarankan HP untuk kamera/mikrofon.
 - Pada produksi, lampiran soal teramati di host R2 publik `pub-f215…r2.dev` dan audio siswa di host R2 publik lain `pub-1ae…r2.dev`. Nama objek yang terlihat mengikuti pola `timestamp_acak_nama-asli.ext` tanpa folder status pada URL yang teramati. Pemisahan `Tepat Waktu` dan `Terlambat` pasti ada pada tampilan guru dan ZIP unduhan; susunan internal bucket R2 tidak dapat diverifikasi dari URL publik.
 - Pada replika, metadata guru, kelas, siswa, tugas, sesi, dan kiriman disimpan di `data/tugas.sqlite`. Berkas disimpan secara fisik di `data/files/tasks/<id-tugas>/<timestamp>_<acak>_<nama-asli>` untuk lampiran dan `data/files/submissions/<id-tugas>/<kelas>/Tepat Waktu|Terlambat/<timestamp>_<acak>_<nama-asli>` untuk kiriman. Unggahan dialirkan dahulu ke `data/uploads/`, lalu dipindah setelah validasi. Gambar lebih dari 50 MB per file dan unggahan yang melewati kapasitas 10 GB ditolak oleh API. URL berkas `/files/...` dapat diakses siapa pun yang mengetahui tautannya, seperti URL R2 publik pada aplikasi asal. Jalur unduh guru `/api/files/blob?url=…` hanya menerima token guru pemilik berkas. Berkas lama dari versi replika pertama dengan lokasi langsung di `data/files/` tetap dapat dibaca.
@@ -62,6 +62,10 @@ ZIP produksi yang diuji berisi 28 MP3 di `IX.1/Tepat Waktu/`, satu berkas per si
 
 ## API
 
+Perubahan frontend dibangun dengan `npm run build`. Skrip `scripts/build-frontend.mjs` memakai bundle dasar yang disimpan di `public/assets`, menerapkan perubahan perilaku, lalu menghasilkan nama aset berdasarkan konten. Logika waktu WIB, identitas kelas, pengambilan siswa, dan ekspor ZIP ada di `public/assets/app-logic.mjs`. Aturan berkas, validasi tugas, dan query yang dipakai bersama oleh `server.mjs` dan `worker.mjs` ada di `api-shared.mjs`; deploy Worker harus menyertakan modul ini. Jalankan `npm test` setelah perubahan.
+
+Migrasi `migrations/001-submission-identity.sql` menambahkan identitas kelas pada kiriman dan indeks unik untuk unggahan ulang. Server lokal menjalankannya otomatis dalam satu transaksi jika indeks `submission_identity` belum ada; kiriman ganda lama disisakan yang terbaru agar indeks dapat dibuat; D1 produksi sudah dimigrasikan pada 5 Oktober 2026. Jangan menjalankan `ALTER TABLE` tersebut dua kali. Deadline tanpa zona dibaca sebagai WIB; waktu pembuatan lama dari SQLite dibaca sebagai UTC. Unggahan ulang mengganti kiriman sebelumnya secara atomik, dan ZIP dibatalkan jika satu berkas gagal diunduh. Batas unggahan adalah 20 berkas, 50 MB per gambar, dan 100 MB per audio/video.
+
 Server melayani endpoint yang dipanggil frontend asli:
 
 | Endpoint | Fungsi |
@@ -80,7 +84,7 @@ Server melayani endpoint yang dipanggil frontend asli:
 
 - Frontend produksi menyimpan password guru di `sessionStorage` dan memasukkannya ke pesan WhatsApp “Hubungi Admin”. Replika menghapus password dari alur itu. Jangan menyalin perilaku tersebut kembali.
 - Replika memakai aset frontend terkompilasi dari deploy publik. Kode sumber React dan Worker produksi tidak tersedia; API pengganti dibuat dari perilaku UI dan kontrak yang dipakai bundle. Replika dapat dijalankan dan diuji sendiri, tetapi bukan salinan sumber backend produksi.
-- Akun Cloudflare yang terhubung hanya menunjukkan Worker bernama `tugas`; daftar Pages dan D1 kosong, dan R2 belum aktif. Deploy produksi asal serta bucket yang dipakai URL publik tidak dapat diinspeksi melalui akun tersebut.
+- Akun Cloudflare MCP sumber pada 1 Oktober 2026 memuat deploy asal `tugas-app`, Worker `tugas-worker`, D1 `tugas-db`, serta bucket R2 `task-files` dan `submission-files`. Snapshot dan strukturnya dicatat di [SOURCE_SNAPSHOT.md](SOURCE_SNAPSHOT.md); hasil migrasi ke akun Cloudflare tujuan dicatat di [MIGRATION_STATUS.md](MIGRATION_STATUS.md).
 - Beberapa URL R2 asal mempunyai akses publik. Repo sengaja tidak menyertakan nama siswa, media siswa, ZIP, token, atau kredensial produksi.
 - Perekaman mikrofon langsung tidak diuji karena akses mikrofon ditolak saat pemeriksaan; jalur unggah MP3 cadangan berhasil diuji. Pemilih berkas Brave tidak menerima injeksi file dari otomasi, sehingga pengujian unggah antarmuka dilakukan melalui pemilih berkas asli Safari.
 - Pada PNG sintetis yang sangat kecil, frontend asal menampilkan persentase kompresi negatif walaupun berkas tetap berhasil dikirim. Replika mempertahankan perilaku tampilan tersebut karena memakai aset frontend yang sama.

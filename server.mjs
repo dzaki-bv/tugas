@@ -3,10 +3,12 @@ import express from 'express';
 import multer from 'multer';
 import bcrypt from 'bcryptjs';
 import { DatabaseSync } from 'node:sqlite';
-import { createHash, randomBytes, randomInt, randomUUID, timingSafeEqual } from 'node:crypto';
-import { mkdirSync, readFileSync, renameSync, unlinkSync, existsSync, statSync } from 'node:fs';
-import { join, resolve, extname, basename, sep } from 'node:path';
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { mkdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs';
+import { join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { compareFileFields, deadlineTimestamp, taskDates, submissionDates } from './public/assets/app-logic.mjs';
+import { SQL, STORAGE_LIMIT_BYTES, MAX_IMAGE_BYTES, fileUrls, isInlineFile, isSubmissionType, parseClassIds, safeFileName, submissionFile, taskCode, taskFields, withClasses } from './api-shared.mjs';
 
 const root = fileURLToPath(new URL('.', import.meta.url));
 const dataDir = resolve(process.env.DATA_DIR || join(root, 'data'));
@@ -26,87 +28,95 @@ CREATE TABLE IF NOT EXISTS submissions (id TEXT PRIMARY KEY, task_id TEXT NOT NU
 CREATE INDEX IF NOT EXISTS idx_tasks_teacher ON tasks(teacher_id);
 CREATE INDEX IF NOT EXISTS idx_submissions_task ON submissions(task_id);`);
 
+const now = () => new Date().toISOString();
+const hash = value => createHash('sha256').update(value).digest('hex');
+const fail = (res, status, error) => res.status(status).json({ error });
+// URL disimpan relatif terhadap origin, jadi header Host dari pengirim tidak ikut tersimpan.
+function localFile(url) {
+  try {
+    const { pathname } = new URL(url, 'http://local');
+    if (!pathname.startsWith('/files/')) return null;
+    const absolute = resolve(filesDir, decodeURIComponent(pathname.slice('/files/'.length)));
+    return absolute.startsWith(filesDir + sep) ? absolute : null;
+  } catch { return null; }
+}
+const pathsOf = rows => rows.flatMap(row => fileUrls(row.file_url)).map(localFile).filter(Boolean);
+const removeFiles = paths => { for (const path of paths) rmSync(path, { force: true }); };
+function fileBytes(paths) {
+  let bytes = 0;
+  for (const path of paths) {
+    try { bytes += statSync(path).size; }
+    catch { /* Missing files are excluded from usage. */ }
+  }
+  return bytes;
+}
+const teacherFiles = teacherId => pathsOf(db.prepare(SQL.teacherFiles).all(teacherId, teacherId));
+const taskFiles = taskId => pathsOf(db.prepare(SQL.taskFiles).all(taskId, taskId));
+const storageLimitBytes = () => {
+  const configured = Number(process.env.STORAGE_LIMIT_BYTES);
+  return Number.isFinite(configured) && configured > 0 ? configured : STORAGE_LIMIT_BYTES;
+};
+function saveFile(file, folders, name) {
+  const relative = [...folders.map(cleanFolder), `${Date.now()}_${randomBytes(4).toString('hex')}_${name}`];
+  const destination = join(filesDir, ...relative);
+  mkdirSync(resolve(destination, '..'), { recursive: true });
+  renameSync(file.path, destination);
+  return `/files/${relative.map(encodeURIComponent).join('/')}`;
+}
+const cleanFolder = name => String(name || 'Tanpa Kelas').replace(/[\\/:*?"<>|]/g, '_').trim().slice(0, 80) || 'Tanpa Kelas';
+
+function migrateSubmissionIdentity() {
+  const [addClassId, linkClasses, createIndex] = readFileSync(join(root, 'migrations/001-submission-identity.sql'), 'utf8').split(';').map(sql => sql.trim()).filter(Boolean);
+  const hasClassId = db.prepare('PRAGMA table_info(submissions)').all().some(column => column.name === 'class_id');
+  const superseded = [];
+  db.exec('BEGIN');
+  try {
+    if (!hasClassId) db.exec(addClassId);
+    db.exec(linkClasses);
+    // Kiriman lama yang ganda akan menggagalkan indeks unik; yang terbaru dipertahankan.
+    const identity = "lower(trim(n.student_name))=lower(trim(s.student_name)) AND coalesce('id:' || n.class_id,'name:' || lower(trim(n.student_class)))=coalesce('id:' || s.class_id,'name:' || lower(trim(s.student_class)))";
+    const older = db.prepare(`SELECT s.rowid, s.file_url FROM submissions s WHERE EXISTS (SELECT 1 FROM submissions n WHERE n.task_id=s.task_id AND ${identity} AND (n.created_at > s.created_at OR (n.created_at = s.created_at AND n.rowid > s.rowid)))`).all();
+    const remove = db.prepare('DELETE FROM submissions WHERE rowid=?');
+    for (const row of older) { remove.run(row.rowid); superseded.push(row); }
+    db.exec(createIndex);
+    db.exec('COMMIT');
+  } catch (error) { db.exec('ROLLBACK'); throw error; }
+  removeFiles(pathsOf(superseded));
+}
+if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name='submission_identity'").get()) migrateSubmissionIdentity();
+
 if (process.env.TEACHER_EMAIL && process.env.TEACHER_PASSWORD) {
   const email = process.env.TEACHER_EMAIL.trim().toLowerCase();
   if (!db.prepare('SELECT id FROM teachers WHERE email=?').get(email)) {
-    db.prepare('INSERT INTO teachers VALUES (?,?,?,?)').run(randomUUID(), email, bcrypt.hashSync(process.env.TEACHER_PASSWORD, 12), new Date().toISOString());
+    db.prepare('INSERT INTO teachers VALUES (?,?,?,?)').run(randomUUID(), email, bcrypt.hashSync(process.env.TEACHER_PASSWORD, 12), now());
   }
 }
 
 const app = express();
 app.disable('x-powered-by');
 app.use(express.json({ limit: '1mb' }));
-app.use('/files', express.static(filesDir, { fallthrough: false, setHeaders: res => res.setHeader('Cache-Control', 'private, max-age=3600') }));
-app.use('/assets', express.static(join(root, 'public/assets'), { immutable: true, maxAge: '1y' }));
+app.use((req, _res, next) => { req.body ??= {}; next(); });
+app.use('/files', express.static(filesDir, {
+  fallthrough: false,
+  setHeaders: (res, path) => {
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    if (!isInlineFile(path)) res.setHeader('Content-Disposition', 'attachment');
+  },
+}));
+app.use('/assets', express.static(join(root, 'public/assets'), {
+  immutable: true, maxAge: '1y', fallthrough: false,
+  setHeaders: (res, path) => { if (path.endsWith(`${sep}index-Ci25O57r.js`)) res.setHeader('Cache-Control', 'no-store'); },
+}));
 const upload = multer({
   storage: multer.diskStorage({ destination: uploadDir, filename: (_req, _file, callback) => callback(null, randomUUID()) }),
   limits: { files: 20, fileSize: 100 * 1024 * 1024 },
 });
 app.use((req, res, next) => {
-  res.on('finish', () => {
-    for (const file of [...(req.files || []), ...(req.file ? [req.file] : [])]) {
-      if (file.path && existsSync(file.path)) unlinkSync(file.path);
-    }
-  });
+  res.on('finish', () => removeFiles([...(req.files || []), ...(req.file ? [req.file] : [])].map(file => file.path)));
   next();
 });
-const now = () => new Date().toISOString();
-const hash = value => createHash('sha256').update(value).digest('hex');
-const fail = (res, status, error) => res.status(status).json({ error });
-const origin = req => process.env.PUBLIC_ORIGIN || `${req.protocol}://${req.get('host')}`;
-const cleanName = name => basename(name || 'file').replace(/[^a-zA-Z0-9._-]/g, '_').slice(-100);
-const cleanFolder = name => String(name || 'Tanpa Kelas').replace(/[\\/:*?"<>|]/g, '_').trim().slice(0, 80) || 'Tanpa Kelas';
-const fileKey = file => `${Date.now()}_${randomBytes(4).toString('hex')}_${cleanName(file.originalname)}`;
-function storageFile(urlValue) {
-  const url = new URL(urlValue);
-  if (!url.pathname.startsWith('/files/')) throw new Error('Invalid file URL');
-  const relative = decodeURIComponent(url.pathname.slice(7));
-  const absolute = resolve(filesDir, relative);
-  if (!absolute.startsWith(filesDir + sep)) throw new Error('Invalid file path');
-  return absolute;
-}
-function saveFile(req, file, folders = []) {
-  const relative = [...folders.map(cleanFolder), fileKey(file)];
-  const destination = join(filesDir, ...relative);
-  mkdirSync(resolve(destination, '..'), { recursive: true });
-  renameSync(file.path, destination);
-  return `${origin(req)}/files/${relative.map(encodeURIComponent).join('/')}`;
-}
-function removeUrls(urls) {
-  for (const value of parseUrls(urls)) {
-    try {
-      const file = storageFile(value);
-      if (existsSync(file)) unlinkSync(file);
-    } catch { /* Old external files are not stored here. */ }
-  }
-}
-function parseUrls(value) {
-  if (!value) return [];
-  try { const parsed = JSON.parse(value); return Array.isArray(parsed) ? parsed : [value]; }
-  catch { return [value]; }
-}
-function fileBytes(urls) {
-  let bytes = 0;
-  for (const value of urls) {
-    try { bytes += statSync(storageFile(value)).size; }
-    catch { /* Missing files are excluded from usage. */ }
-  }
-  return bytes;
-}
-function teacherFileUrls(teacherId) {
-  const urls = [];
-  for (const task of db.prepare('SELECT file_url FROM tasks WHERE teacher_id=?').all(teacherId)) urls.push(...parseUrls(task.file_url));
-  for (const sub of db.prepare('SELECT file_url FROM submissions WHERE task_id IN (SELECT id FROM tasks WHERE teacher_id=?)').all(teacherId)) urls.push(...parseUrls(sub.file_url));
-  return urls;
-}
-const teacherUsageBytes = teacherId => fileBytes(teacherFileUrls(teacherId));
-const storageLimitBytes = () => {
-  const configured = Number(process.env.STORAGE_LIMIT_BYTES);
-  return Number.isFinite(configured) && configured > 0 ? configured : 10 * 1024 ** 3;
-};
-function taskFor(row) {
-  return { ...row, classes: db.prepare('SELECT c.id, c.name, (SELECT COUNT(*) FROM students s WHERE s.class_id=c.id) AS student_count FROM classes c JOIN task_classes tc ON tc.class_id=c.id WHERE tc.task_id=? ORDER BY c.name').all(row.id) };
-}
+function taskFor(row) { return withClasses([taskDates(row)], db.prepare(SQL.taskClasses).all(row.id))[0]; }
 function taskById(id) { const row = db.prepare('SELECT * FROM tasks WHERE id=?').get(id); return row ? taskFor(row) : null; }
 function tokenTeacher(req) {
   const token = /^Bearer (.+)$/i.exec(req.get('authorization') || '')?.[1];
@@ -124,27 +134,21 @@ function ownedTask(req) {
 function ownedClass(req) {
   return db.prepare('SELECT * FROM classes WHERE id=? AND teacher_id=?').get(req.params.id, req.teacher.id);
 }
-function parseClassIds(raw, teacherId) {
-  if (!raw) return [];
-  const ids = JSON.parse(raw);
-  if (!Array.isArray(ids)) throw new Error('Daftar kelas tidak valid.');
-  for (const id of ids) if (!db.prepare('SELECT id FROM classes WHERE id=? AND teacher_id=?').get(id, teacherId)) throw new Error('Kelas tidak ditemukan.');
-  return [...new Set(ids)];
-}
+const studentsOf = classId => db.prepare(SQL.students).all(classId);
 
 app.post('/api/auth/login', (req, res) => {
-  const email = String(req.body?.email || '').trim().toLowerCase();
+  const email = String(req.body.email || '').trim().toLowerCase();
   const teacher = db.prepare('SELECT * FROM teachers WHERE email=?').get(email);
-  if (!teacher || !bcrypt.compareSync(String(req.body?.password || ''), teacher.password_hash)) return fail(res, 401, 'Email atau password salah');
+  if (!teacher || !bcrypt.compareSync(String(req.body.password || ''), teacher.password_hash)) return fail(res, 401, 'Email atau password salah');
   const token = randomBytes(32).toString('base64url');
   db.prepare('INSERT INTO sessions VALUES (?,?,?)').run(hash(token), teacher.id, new Date(Date.now() + 30 * 86400000).toISOString());
   res.json({ token, teacher_id: teacher.id });
 });
 app.get('/api/auth/check', requireTeacher, (req, res) => res.json({ ok: true, teacher_id: req.teacher.id }));
 
-app.get('/api/classes', requireTeacher, (req, res) => res.json({ classes: db.prepare('SELECT c.id, c.name, COUNT(s.id) AS student_count FROM classes c LEFT JOIN students s ON s.class_id=c.id WHERE c.teacher_id=? GROUP BY c.id ORDER BY c.name').all(req.teacher.id) }));
+app.get('/api/classes', requireTeacher, (req, res) => res.json({ classes: db.prepare(SQL.classes).all(req.teacher.id) }));
 app.post('/api/classes', requireTeacher, (req, res) => {
-  const name = String(req.body?.name || '').trim();
+  const name = String(req.body.name || '').trim();
   if (!name) return fail(res, 400, 'Nama kelas wajib diisi.');
   try {
     const id = randomUUID();
@@ -154,10 +158,15 @@ app.post('/api/classes', requireTeacher, (req, res) => {
 });
 app.put('/api/classes/:id', requireTeacher, (req, res) => {
   if (!ownedClass(req)) return fail(res, 404, 'Kelas tidak ditemukan.');
-  const name = String(req.body?.name || '').trim();
+  const name = String(req.body.name || '').trim();
   if (!name) return fail(res, 400, 'Nama kelas wajib diisi.');
-  try { db.prepare('UPDATE classes SET name=? WHERE id=?').run(name, req.params.id); res.json({ class: { id: req.params.id, name } }); }
-  catch { fail(res, 409, 'Kelas sudah ada.'); }
+  db.exec('BEGIN');
+  try {
+    db.prepare('UPDATE classes SET name=? WHERE id=?').run(name, req.params.id);
+    db.prepare('UPDATE submissions SET student_class=? WHERE class_id=?').run(name, req.params.id);
+    db.exec('COMMIT');
+    res.json({ class: { id: req.params.id, name } });
+  } catch { db.exec('ROLLBACK'); fail(res, 409, 'Kelas sudah ada.'); }
 });
 app.delete('/api/classes/:id', requireTeacher, (req, res) => {
   if (!ownedClass(req)) return fail(res, 404, 'Kelas tidak ditemukan.');
@@ -166,14 +175,25 @@ app.delete('/api/classes/:id', requireTeacher, (req, res) => {
 });
 app.get('/api/classes/:id/students', requireTeacher, (req, res) => {
   if (!ownedClass(req)) return fail(res, 404, 'Kelas tidak ditemukan.');
-  res.json({ students: db.prepare('SELECT id, name FROM students WHERE class_id=? ORDER BY name').all(req.params.id) });
+  res.json({ students: studentsOf(req.params.id) });
 });
-app.post('/api/classes/:id/students', requireTeacher, (req, res) => {
+app.put('/api/classes/:id/students', requireTeacher, (req, res) => {
   if (!ownedClass(req)) return fail(res, 404, 'Kelas tidak ditemukan.');
-  const names = Array.isArray(req.body?.names) ? req.body.names : [];
-  const insert = db.prepare('INSERT OR IGNORE INTO students VALUES (?,?,?)');
-  for (const name of names) if (String(name).trim()) insert.run(randomUUID(), req.params.id, String(name).trim());
-  res.json({ students: db.prepare('SELECT id, name FROM students WHERE class_id=? ORDER BY name').all(req.params.id) });
+  if (!Array.isArray(req.body.names)) return fail(res, 400, 'Daftar siswa tidak valid.');
+  const names = req.body.names.map(name => String(name).trim()).filter(Boolean);
+  if (new Set(names.map(name => name.toLocaleLowerCase('id'))).size !== names.length) return fail(res, 400, 'Nama siswa tidak boleh berulang.');
+  const existing = studentsOf(req.params.id);
+  const wanted = new Set(names);
+  const current = new Set(existing.map(student => student.name));
+  const remove = db.prepare('DELETE FROM students WHERE id=?');
+  const insert = db.prepare('INSERT INTO students VALUES (?,?,?)');
+  db.exec('BEGIN');
+  try {
+    for (const student of existing) if (!wanted.has(student.name)) remove.run(student.id);
+    for (const name of names) if (!current.has(name)) insert.run(randomUUID(), req.params.id, name);
+    db.exec('COMMIT');
+  } catch (error) { db.exec('ROLLBACK'); throw error; }
+  res.json({ students: studentsOf(req.params.id) });
 });
 app.delete('/api/students/:id', requireTeacher, (req, res) => {
   const result = db.prepare('DELETE FROM students WHERE id=? AND class_id IN (SELECT id FROM classes WHERE teacher_id=?)').run(req.params.id, req.teacher.id);
@@ -181,34 +201,36 @@ app.delete('/api/students/:id', requireTeacher, (req, res) => {
   res.json({ ok: true });
 });
 
-app.get('/api/tasks', requireTeacher, (req, res) => res.json({ tasks: db.prepare('SELECT * FROM tasks WHERE teacher_id=? ORDER BY created_at DESC').all(req.teacher.id).map(taskFor) }));
+app.get('/api/tasks', requireTeacher, (req, res) => {
+  const tasks = db.prepare('SELECT * FROM tasks WHERE teacher_id=? ORDER BY created_at DESC').all(req.teacher.id).map(taskDates);
+  res.json({ tasks: withClasses(tasks, db.prepare(SQL.teacherTaskClasses).all(req.teacher.id)) });
+});
 app.post('/api/tasks', requireTeacher, upload.single('file'), (req, res) => {
-  const { title, subject, deadline, description = '', submission_type = 'image' } = req.body;
-  if (!title?.trim() || !subject?.trim() || !deadline || !['image', 'video', 'audio'].includes(submission_type) || Number.isNaN(new Date(deadline).getTime())) return fail(res, 400, 'Lengkapi judul, mata pelajaran, dan deadline.');
-  let classes;
-  try { classes = parseClassIds(req.body.classes, req.teacher.id); }
-  catch (error) { return fail(res, 400, error.message); }
+  const fields = taskFields(req.body);
+  const submissionType = req.body.submission_type || 'image';
+  if (!fields || !isSubmissionType(submissionType)) return fail(res, 400, 'Lengkapi judul, mata pelajaran, dan deadline.');
+  const classIds = parseClassIds(req.body.classes);
+  if (!classIds) return fail(res, 400, 'Daftar kelas tidak valid.');
+  if (db.prepare(SQL.ownedClassCount).get(req.teacher.id, JSON.stringify(classIds)).n !== classIds.length) return fail(res, 400, 'Kelas tidak ditemukan.');
+  if (req.file && fileBytes(teacherFiles(req.teacher.id)) + req.file.size > storageLimitBytes()) return fail(res, 413, 'Kapasitas penyimpanan sudah penuh.');
   let code;
-  do { code = String(randomInt(0, 1000000)).padStart(6, '0'); }
-  while (db.prepare('SELECT id FROM tasks WHERE task_code=?').get(code));
+  do { code = taskCode(); } while (db.prepare(SQL.taskByCode).get(code));
   const id = randomUUID();
-  if (req.file && teacherUsageBytes(req.teacher.id) + req.file.size > storageLimitBytes()) return fail(res, 413, 'Kapasitas penyimpanan sudah penuh.');
-  const fileUrl = req.file ? saveFile(req, req.file, ['tasks', id]) : null;
-  db.prepare('INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?,?,?)').run(id, req.teacher.id, title.trim(), subject.trim(), String(description).trim(), deadline, submission_type, code, fileUrl, now());
-  for (const classId of classes) db.prepare('INSERT INTO task_classes VALUES (?,?)').run(id, classId);
+  const fileUrl = req.file ? saveFile(req.file, ['tasks', id], safeFileName(req.file.originalname)) : null;
+  db.prepare('INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?,?,?)').run(id, req.teacher.id, fields.title, fields.subject, fields.description, fields.deadline, submissionType, code, fileUrl, now());
+  db.prepare(SQL.linkTaskClasses).run(id, JSON.stringify(classIds));
   res.status(201).json({ task: taskById(id) });
 });
 app.get('/api/tasks/code/:code', (req, res) => {
-  const row = db.prepare('SELECT * FROM tasks WHERE task_code=?').get(req.params.code);
+  const row = db.prepare(SQL.taskByCode).get(req.params.code);
   if (!row) return fail(res, 404, 'Kode tugas tidak ditemukan.');
   res.json({ task: taskFor(row) });
 });
 app.get('/api/tasks/code/:code/classes/:classId/students', (req, res) => {
-  const task = db.prepare('SELECT * FROM tasks WHERE task_code=?').get(req.params.code);
+  const task = db.prepare(SQL.taskByCode).get(req.params.code);
   if (!task) return fail(res, 404, 'Tugas tidak ditemukan.');
-  const allowed = db.prepare('SELECT 1 FROM task_classes WHERE task_id=? AND class_id=?').get(task.id, req.params.classId);
-  if (!allowed) return fail(res, 404, 'Kelas tidak tersedia untuk tugas ini.');
-  res.json({ students: db.prepare('SELECT id, name FROM students WHERE class_id=? ORDER BY name').all(req.params.classId) });
+  if (!db.prepare(SQL.taskClass).get(task.id, req.params.classId)) return fail(res, 404, 'Kelas tidak tersedia untuk tugas ini.');
+  res.json({ students: studentsOf(req.params.classId) });
 });
 app.get('/api/tasks/:id', requireTeacher, (req, res) => {
   const row = ownedTask(req);
@@ -217,60 +239,61 @@ app.get('/api/tasks/:id', requireTeacher, (req, res) => {
 });
 app.get('/api/tasks/:id/submissions', requireTeacher, (req, res) => {
   if (!ownedTask(req)) return fail(res, 404, 'Tugas tidak ditemukan.');
-  res.json({ submissions: db.prepare('SELECT * FROM submissions WHERE task_id=? ORDER BY created_at DESC').all(req.params.id) });
+  res.json({ submissions: db.prepare(SQL.submissions).all(req.params.id).map(submissionDates) });
+});
+app.put('/api/tasks/:id', requireTeacher, (req, res) => {
+  const task = ownedTask(req);
+  if (!task) return fail(res, 404, 'Tugas tidak ditemukan.');
+  const fields = taskFields(req.body);
+  if (!fields) return fail(res, 400, 'Lengkapi judul, mata pelajaran, dan deadline.');
+  db.prepare('UPDATE tasks SET title=?,subject=?,description=?,deadline=? WHERE id=?').run(fields.title, fields.subject, fields.description, fields.deadline, task.id);
+  res.json({ task: taskById(task.id) });
 });
 app.delete('/api/tasks/:id', requireTeacher, (req, res) => {
   const task = ownedTask(req);
   if (!task) return fail(res, 404, 'Tugas tidak ditemukan.');
-  removeUrls(task.file_url);
-  for (const sub of db.prepare('SELECT file_url FROM submissions WHERE task_id=?').all(task.id)) removeUrls(sub.file_url);
+  const files = taskFiles(task.id);
   db.prepare('DELETE FROM tasks WHERE id=?').run(task.id);
+  removeFiles(files);
   res.json({ ok: true });
 });
 app.post('/api/submissions', upload.any(), (req, res) => {
-  const task = db.prepare('SELECT * FROM tasks WHERE id=? AND task_code=?').get(req.body?.task_id, req.body?.task_code);
+  const { body } = req;
+  const task = db.prepare('SELECT * FROM tasks WHERE id=? AND task_code=?').get(body.task_id, body.task_code);
   if (!task) return fail(res, 404, 'Tugas tidak ditemukan.');
-  const studentName = String(req.body?.student_name || '').trim();
-  const studentClass = String(req.body?.student_class || '').trim();
-  if (!studentName || !studentClass || !req.files?.length) return fail(res, 400, 'Lengkapi nama, kelas, dan file tugas.');
-  const classes = taskFor(task).classes;
-  if (classes.length) {
-    const selected = classes.find(c => c.name.toLowerCase() === studentClass.toLowerCase());
+  const studentName = String(body.student_name || '').trim();
+  let studentClass = String(body.student_class || '').trim(), classId = null;
+  if (db.prepare(SQL.taskHasClasses).get(task.id)) {
+    const selected = db.prepare(SQL.taskClass).get(task.id, String(body.class_id || ''));
     if (!selected) return fail(res, 400, 'Kelas tidak tersedia untuk tugas ini.');
-    const student = db.prepare('SELECT id FROM students WHERE class_id=? AND lower(name)=lower(?)').get(selected.id, studentName);
-    if (!student) return fail(res, 400, 'Nama tidak ada di daftar kelas ini.');
+    if (studentName && !db.prepare(SQL.rosterStudent).get(selected.id, studentName)) return fail(res, 400, 'Nama tidak ada di daftar kelas ini.');
+    ({ id: classId, name: studentClass } = selected);
   }
-  const files = [...req.files].sort((a, b) => a.fieldname.localeCompare(b.fieldname));
-  const extensions = {
-    image: new Set(['.jpg', '.jpeg', '.png', '.webp']),
-    video: new Set(['.mp4', '.mov', '.webm', '.3gp']),
-    audio: new Set(['.mp3', '.m4a', '.aac', '.ogg', '.wav', '.flac', '.webm']),
-  };
-  if (files.some(file => !file.mimetype.startsWith(`${task.submission_type}/`) && !extensions[task.submission_type].has(extname(file.originalname).toLowerCase()))) return fail(res, 400, 'Jenis file tidak sesuai dengan tugas.');
-  if (task.submission_type === 'image' && files.some(file => file.size > 50 * 1024 ** 2)) return fail(res, 413, 'Foto maksimal 50 MB per file.');
-  const previous = db.prepare('SELECT * FROM submissions WHERE task_id=? AND lower(student_name)=lower(?) AND lower(student_class)=lower(?)').get(task.id, studentName, studentClass);
+  if (!studentName || !studentClass || !req.files.length) return fail(res, 400, 'Lengkapi nama, kelas, dan file tugas.');
+  const files = req.files.sort((a, b) => compareFileFields(a.fieldname, b.fieldname));
+  const accepted = files.map(file => submissionFile(task.submission_type, file.originalname, file.mimetype));
+  if (accepted.includes(null)) return fail(res, 400, 'Jenis file tidak sesuai dengan tugas.');
+  if (task.submission_type === 'image' && files.some(file => file.size > MAX_IMAGE_BYTES)) return fail(res, 413, 'Foto maksimal 50 MB per file.');
+  const previous = db.prepare(SQL.previousSubmission).get(task.id, studentName, classId, studentClass);
+  const previousFiles = previous ? pathsOf([previous]) : [];
   const incomingBytes = files.reduce((sum, file) => sum + file.size, 0);
-  const replacedBytes = previous ? fileBytes(parseUrls(previous.file_url)) : 0;
-  if (teacherUsageBytes(task.teacher_id) - replacedBytes + incomingBytes > storageLimitBytes()) return fail(res, 413, 'Kapasitas penyimpanan sudah penuh.');
-  const status = Date.now() > new Date(task.deadline).getTime() ? 'Terlambat' : 'Tepat Waktu';
-  const urls = files.map(file => saveFile(req, file, ['submissions', task.id, studentClass, status]));
-  if (previous) { removeUrls(previous.file_url); db.prepare('DELETE FROM submissions WHERE id=?').run(previous.id); }
-  const fileUrl = urls.length === 1 ? urls[0] : JSON.stringify(urls);
-  db.prepare('INSERT INTO submissions VALUES (?,?,?,?,?,?,?)').run(randomUUID(), task.id, studentName, studentClass, String(req.body?.student_note || '').trim(), fileUrl, now());
+  if (fileBytes(teacherFiles(task.teacher_id)) - fileBytes(previousFiles) + incomingBytes > storageLimitBytes()) return fail(res, 413, 'Kapasitas penyimpanan sudah penuh.');
+  const status = Date.now() > Date.parse(deadlineTimestamp(task.deadline)) ? 'Terlambat' : 'Tepat Waktu';
+  const urls = files.map((file, index) => saveFile(file, ['submissions', task.id, studentClass, status], accepted[index].name));
+  try {
+    db.prepare(SQL.upsertSubmission).run(randomUUID(), task.id, studentName, studentClass, classId, String(body.student_note || '').trim(), JSON.stringify(urls), now());
+  } catch (error) { removeFiles(urls.map(localFile)); throw error; }
+  removeFiles(previousFiles);
   res.status(201).json({ file_urls: urls, replaced: !!previous });
 });
 
 app.get('/api/storage/usage', requireTeacher, (req, res) => {
-  res.json({ used_bytes: teacherUsageBytes(req.teacher.id) });
+  res.json({ used_bytes: fileBytes(teacherFiles(req.teacher.id)) });
 });
 app.get('/api/files/blob', requireTeacher, (req, res) => {
-  let file;
-  const requestedUrl = String(req.query.url);
-  try {
-    file = storageFile(requestedUrl);
-  } catch { return fail(res, 400, 'URL file tidak valid.'); }
-  if (!teacherFileUrls(req.teacher.id).includes(requestedUrl)) return fail(res, 404, 'File tidak ditemukan.');
-  if (!existsSync(file)) return fail(res, 404, 'File tidak ditemukan.');
+  const file = localFile(String(req.query.url));
+  if (!file) return fail(res, 400, 'URL file tidak valid.');
+  if (!teacherFiles(req.teacher.id).includes(file)) return fail(res, 404, 'File tidak ditemukan.');
   res.sendFile(file);
 });
 
@@ -282,26 +305,25 @@ function admin(req, res, next) {
 }
 app.get('/api/admin/teachers', admin, (_req, res) => res.json({ teachers: db.prepare('SELECT id, email, created_at FROM teachers ORDER BY created_at DESC').all() }));
 app.post('/api/admin/teachers', admin, (req, res) => {
-  const email = String(req.body?.email || '').trim().toLowerCase();
-  const password = String(req.body?.password || '');
+  const email = String(req.body.email || '').trim().toLowerCase();
+  const password = String(req.body.password || '');
   if (!email.includes('@') || password.length < 8) return fail(res, 400, 'Email valid dan password minimal 8 karakter diperlukan.');
   try { const id = randomUUID(); db.prepare('INSERT INTO teachers VALUES (?,?,?,?)').run(id, email, bcrypt.hashSync(password, 12), now()); res.status(201).json({ teacher: { id, email } }); }
   catch { fail(res, 409, 'Email sudah digunakan.'); }
 });
 app.delete('/api/admin/teachers/:id', admin, (req, res) => {
-  const tasks = db.prepare('SELECT * FROM tasks WHERE teacher_id=?').all(req.params.id);
-  for (const task of tasks) {
-    removeUrls(task.file_url);
-    for (const sub of db.prepare('SELECT file_url FROM submissions WHERE task_id=?').all(task.id)) removeUrls(sub.file_url);
-  }
+  const files = teacherFiles(req.params.id);
   const result = db.prepare('DELETE FROM teachers WHERE id=?').run(req.params.id);
   if (!result.changes) return fail(res, 404, 'Guru tidak ditemukan.');
+  removeFiles(files);
   res.json({ ok: true });
 });
 
+app.use('/api', (_req, res) => fail(res, 404, 'Endpoint tidak ditemukan.'));
 app.get(/.*/, (_req, res) => res.type('html').send(readFileSync(join(root, 'public/index.html'))));
 app.use((error, _req, res, _next) => {
   if (error instanceof multer.MulterError) return fail(res, 400, error.message);
+  if (error.status === 404) return fail(res, 404, 'File tidak ditemukan.');
   console.error(error);
   return fail(res, 500, 'Terjadi kesalahan server.');
 });

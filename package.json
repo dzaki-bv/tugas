@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
+    "build": "node scripts/build-frontend.mjs",
     "start": "node server.mjs",
     "dev": "node --watch server.mjs",
     "test": "node --test"
@@ -24,5 +25,8 @@
     "dotenv": "^18.0.4",
     "express": "^5.2.1",
     "multer": "^2.4.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.1"
   }
 }

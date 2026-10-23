@@ -15,7 +15,7 @@ test('teacher, class, task, student upload, replacement, file download, deletion
   const server = app.listen(0);
   await new Promise(resolve => server.once('listening', resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
-  const storedFile = url => join(dir, 'files', decodeURIComponent(new URL(url).pathname.slice('/files/'.length)));
+  const storedFile = url => join(dir, 'files', decodeURIComponent(new URL(url, base).pathname.slice('/files/'.length)));
   let token;
   async function api(path, options = {}) {
     const headers = { ...(options.headers || {}) };
@@ -25,13 +25,24 @@ test('teacher, class, task, student upload, replacement, file download, deletion
     return { status: response.status, body };
   }
   try {
+    for (const path of ['/assets/missing.js', '/files/missing.mp3', '/api/missing']) {
+      const response = await fetch(base + path);
+      assert.equal(response.status, 404);
+    }
+    assert.equal((await fetch(base + '/kumpul?code=900001')).status, 200);
     const login = await api('/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'teacher@example.test', password: 'strong-test-password' }) });
     assert.equal(login.status, 200);
     token = login.body.token;
     const classroom = await api('/api/classes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'IX.1' }) });
     assert.equal(classroom.status, 201);
     const classId = classroom.body.class.id;
-    await api(`/api/classes/${classId}/students`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ names: ['Siswa Uji'] }) });
+    const replaceStudents = names => api(`/api/classes/${classId}/students`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ names }) });
+    const originalStudentId = (await replaceStudents(['Siswa Uji'])).body.students[0].id;
+    const expanded = await replaceStudents(['Siswa Uji', 'Siswa Kedua']);
+    assert.equal(expanded.status, 200);
+    assert.equal(expanded.body.students.length, 2);
+    const reduced = await replaceStudents(['Siswa Uji']);
+    assert.deepEqual(reduced.body.students, [{ id: originalStudentId, name: 'Siswa Uji' }]);
     const taskForm = new FormData();
     taskForm.set('title', 'Tugas Audio');
     taskForm.set('subject', 'Bahasa');
@@ -44,8 +55,17 @@ test('teacher, class, task, student upload, replacement, file download, deletion
     assert.match(created.body.task.task_code, /^\d{6}$/);
     assert.equal(created.body.task.classes[0].name, 'IX.1');
     const taskId = created.body.task.id;
+    const editedDeadline = new Date(Date.now() + 365 * 86400000).toISOString().slice(0, 16);
+    const edited = await api(`/api/tasks/${taskId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: 'Tugas Diedit', subject: 'English', description: 'Petunjuk baru', deadline: editedDeadline }) });
+    assert.equal(edited.status, 200);
+    assert.equal(edited.body.task.title, 'Tugas Diedit');
+    assert.equal(edited.body.task.task_code, created.body.task.task_code);
+    assert.deepEqual(edited.body.task.classes, created.body.task.classes);
+    assert.equal(edited.body.task.file_url, created.body.task.file_url);
+    assert.equal(Date.parse(edited.body.task.deadline), Date.parse(editedDeadline + ':00+07:00'));
+
     const publicTask = await api(`/api/tasks/code/${created.body.task.task_code}`);
-    assert.equal(publicTask.body.task.title, 'Tugas Audio');
+    assert.equal(publicTask.body.task.title, 'Tugas Diedit');
     const students = await api(`/api/tasks/code/${created.body.task.task_code}/classes/${classId}/students`);
     assert.equal(students.body.students[0].name, 'Siswa Uji');
     const submit = async content => {
@@ -53,7 +73,7 @@ test('teacher, class, task, student upload, replacement, file download, deletion
       form.set('task_id', taskId);
       form.set('task_code', created.body.task.task_code);
       form.set('student_name', 'Siswa Uji');
-      form.set('student_class', 'IX.1');
+      form.set('class_id', classId);
       form.set('file_0', new Blob([content], { type: 'audio/mpeg' }), 'rekaman.mp3');
       return api('/api/submissions', { method: 'POST', body: form });
     };
@@ -68,6 +88,18 @@ test('teacher, class, task, student upload, replacement, file download, deletion
     assert.equal(existsSync(storedFile(replacement.body.file_urls[0])), true);
     const listed = await api(`/api/tasks/${taskId}/submissions`);
     assert.equal(listed.body.submissions.length, 1);
+    assert.equal(listed.body.submissions[0].class_id, classId);
+    const orderedForm = new FormData();
+    orderedForm.set('task_id', taskId); orderedForm.set('task_code', created.body.task.task_code);
+    orderedForm.set('student_name', 'Siswa Uji'); orderedForm.set('class_id', classId);
+    for (let i = 0; i < 12; i++) orderedForm.set(`file_${i}`, new Blob([String(i)], { type: 'audio/mpeg' }), `part_${i}.mp3`);
+    const ordered = await api('/api/submissions', { method: 'POST', body: orderedForm });
+    assert.deepEqual(ordered.body.file_urls.map(url => Number(/part_(\d+)\.mp3$/.exec(url)[1])), Array.from({ length: 12 }, (_, i) => i));
+    const restored = await submit('audio-second');
+    replacement.body.file_urls = restored.body.file_urls;
+    assert.equal((await api(`/api/classes/${classId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'IX.1 Baru' }) })).status, 200);
+    assert.equal((await api(`/api/tasks/${taskId}/submissions`)).body.submissions[0].student_class, 'IX.1 Baru');
+    await api(`/api/classes/${classId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'IX.1' }) });
     const file = await fetch(base + `/api/files/blob?url=${encodeURIComponent(replacement.body.file_urls[0])}`, { headers: { Authorization: `Bearer ${token}` } });
     assert.equal(await file.text(), 'audio-second');
     const usage = await api('/api/storage/usage');
@@ -127,7 +159,7 @@ test('teacher, class, task, student upload, replacement, file download, deletion
     lateForm.set('task_id', lateTask.body.task.id);
     lateForm.set('task_code', lateTask.body.task.task_code);
     lateForm.set('student_name', 'Siswa Uji');
-    lateForm.set('student_class', 'IX.1');
+    lateForm.set('class_id', classId);
     lateForm.set('file_0', new Blob(['late-audio'], { type: 'audio/mpeg' }), 'telat.mp3');
     const late = await api('/api/submissions', { method: 'POST', body: lateForm });
     assert.equal(late.status, 201);
