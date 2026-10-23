@@ -1,0 +1,16 @@
+// Konfigurasi Worker produksi `tugas`, disalin dari pengaturan versi 499cfd6d (22 Oktober 2026).
+// ADMIN_SETUP_KEY adalah secret Worker dan tidak disimpan di sini.
+{
+  "name": "tugas",
+  "account_id": "decf089cc411f44bb51c8e78e7135547",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-09-30",
+  "compatibility_flags": ["formdata_parser_supports_files"],
+  "workers_dev": true,
+  "assets": { "directory": "public", "binding": "ASSETS", "run_worker_first": true },
+  "d1_databases": [{ "binding": "DB", "database_name": "tugas-db", "database_id": "2633955f-71c0-4563-80d3-52963daf9fd4" }],
+  "r2_buckets": [
+    { "binding": "TASK_FILES", "bucket_name": "task-files" },
+    { "binding": "SUBMISSION_FILES", "bucket_name": "submission-files" }
+  ]
+}
