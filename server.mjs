@@ -350,5 +350,5 @@ app.use((error, _req, res, _next) => {
   return fail(res, 500, 'Terjadi kesalahan server.');
 });
 
-if (process.env.NODE_ENV !== 'test') app.listen(Number(process.env.PORT || 8787), () => console.log(`Sistem Tugas: http://localhost:${process.env.PORT || 8787}`));
+if (process.env.NODE_ENV !== 'test') app.listen(Number(process.env.PORT || 8787), () => console.log(`Kumpulin: http://localhost:${process.env.PORT || 8787}`));
 export { app, db };

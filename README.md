@@ -1,4 +1,4 @@
-# Sistem Tugas
+# Kumpulin
 
 Tampilan React dan aset aplikasi asal `https://tugas-app.pages.dev/` disalin dari deploy publik, lalu URL API diarahkan ke origin yang sama. Deployment baru ada di `https://tugas.dzaki-fird.workers.dev/`, memakai `worker.mjs` dengan D1 dan R2 di akun Cloudflare tujuan. `server.mjs` tetap tersedia sebagai replika lokal berbasis SQLite dan berkas lokal. Data produksi tidak disalin ke Git.
 

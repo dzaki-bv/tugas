@@ -146,7 +146,7 @@ async function route(request, env) {
   }
   if (!path.startsWith('/api/')) {
     if (path === '/assets/index-Ci25O57r.js' && (method === 'GET' || method === 'HEAD')) {
-      return new Response("export * from './index-6780e01e.js';\n", { headers: {
+      return new Response("export * from './index-715064bb.js';\n", { headers: {
         'Content-Type': 'application/javascript; charset=utf-8',
         'Cache-Control': 'no-store',
       } });

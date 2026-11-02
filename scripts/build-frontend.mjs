@@ -27,6 +27,9 @@ entry = `import { isLate as taskIsLate, addSubmissionFiles as archiveSubmissionF
 chunk = `import { createStudentLoader as studentListLoader, deadlineTimestamp as taskDeadlineTimestamp } from './${helperName}';\n` + chunk;
 const editor = (await transform(await read('scripts/frontend/task-editor.jsx'), { loader: 'jsx', jsxFactory: 'pe.createElement', jsxFragment: 'pe.Fragment' })).code.replaceAll('pe.createElement', 'Ye.createElement');
 entry += '\n' + editor;
+// Nama merek: Kumpulin (sidebar guru dan halaman beranda).
+entry = replaceOnce(entry, 'children: "\\u{1F33F} Sistem Tugas" }', 'children: "\\u{1F33F} Kumpulin" }');
+entry = replaceOnce(entry, 'pe.jsx("h1", { children: "Sistem Tugas" })', 'pe.jsx("h1", { children: "Kumpulin" })');
 // Dasbor dan halaman Kelas: pencarian dan tampil bertahap per 50 untuk ribuan item.
 entry = replaceOnce(entry, '  Ye.useEffect(() => {\n    if (r !== "/dashboard") return;', '  const taskList = useListWindow(u, task => [task.title, task.subject, task.task_code]);\n  Ye.useEffect(() => {\n    if (r !== "/dashboard") return;');
 entry = replaceOnce(entry, 'pe.jsx("div", { className: "task-list", children: u.map((M) => pe.jsxs(Ju, {', 'pe.jsxs(pe.Fragment, { children: [pe.jsx(ListSearch, { list: taskList, label: "Cari tugas", placeholder: "Cari judul, mata pelajaran, atau kode" }), pe.jsx("div", { className: "task-list", children: taskList.shown.map((M) => pe.jsxs(Ju, {');
