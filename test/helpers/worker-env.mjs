@@ -1,4 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
+import { readFileSync } from 'node:fs';
 
 export async function createWorkerEnv() {
   const sql = new DatabaseSync(':memory:');
@@ -10,6 +11,7 @@ export async function createWorkerEnv() {
     CREATE TABLE task_classes(task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE,class_id TEXT REFERENCES classes(id) ON DELETE CASCADE,PRIMARY KEY(task_id,class_id));
     CREATE TABLE submissions(id TEXT PRIMARY KEY,task_id TEXT REFERENCES tasks(id),student_name TEXT,student_class TEXT,class_id TEXT REFERENCES classes(id) ON DELETE SET NULL,file_url TEXT,student_note TEXT,created_at TEXT DEFAULT CURRENT_TIMESTAMP);
     CREATE UNIQUE INDEX submission_identity ON submissions(task_id,lower(trim(student_name)),coalesce('id:' || class_id,'name:' || lower(trim(student_class))));`);
+  sql.exec(readFileSync(new URL('../../migrations/002-file-bytes.sql', import.meta.url), 'utf8'));
   const DB = {
     prepare(text) {
       let args = [];

@@ -5,6 +5,16 @@ export const STORAGE_LIMIT_BYTES = 10 * 1024 ** 3;
 export const MAX_SUBMISSION_FILES = 20;
 export const MAX_IMAGE_BYTES = 50 * 1024 ** 2;
 export const MAX_FILE_BYTES = 100 * 1024 ** 2;
+// Batas panjang isian teks. Frontend memakai angka yang sama lewat atribut maxLength.
+export const TEXT_LIMITS = { title: 200, subject: 100, description: 5000, className: 100, studentName: 100, studentNote: 1000 };
+const TEXT_LABELS = { title: 'Judul', subject: 'Mata pelajaran', description: 'Deskripsi', className: 'Nama kelas', studentName: 'Nama siswa', studentNote: 'Catatan' };
+// Mengembalikan pesan galat untuk isian pertama yang melewati batas, atau null.
+export function textTooLong(values) {
+  for (const [field, value] of Object.entries(values)) {
+    if (String(value ?? '').length > TEXT_LIMITS[field]) return `${TEXT_LABELS[field]} maksimal ${TEXT_LIMITS[field]} karakter.`;
+  }
+  return null;
+}
 
 const SUBMISSION_TYPES = {
   image: { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp' },

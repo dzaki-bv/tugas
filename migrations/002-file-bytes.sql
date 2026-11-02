@@ -1,0 +1,2 @@
+ALTER TABLE tasks ADD COLUMN file_bytes INTEGER;
+ALTER TABLE submissions ADD COLUMN file_bytes INTEGER

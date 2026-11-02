@@ -165,3 +165,35 @@ test('deleting a teacher relies on cascades for classes, students and task links
   for (const table of ['teachers', 'classes', 'students', 'tasks', 'task_classes', 'submissions']) assert.equal(fixture.sql.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n, 0, table);
   assert.equal(fixture.objects.size, 0);
 });
+
+test('capacity is read from file_bytes; the bucket is listed only once to backfill old rows', async t => {
+  const fixture = await createWorkerEnv(); t.after(() => fixture.sql.close()); seedTask(fixture.sql);
+  fixture.objects.set('legacy.mp3', new Uint8Array(7).buffer);
+  fixture.sql.prepare('INSERT INTO submissions(id,task_id,student_name,student_class,file_url) VALUES(?,?,?,?,?)').run('legacy', 'task', 'Lama', 'Bebas', JSON.stringify(['https://tugas.dzaki-fird.workers.dev/media/submission/legacy.mp3', 'https://tugas.dzaki-fird.workers.dev/media/submission/missing.mp3']));
+  let lists = 0;
+  const list = fixture.env.SUBMISSION_FILES.list;
+  fixture.env.SUBMISSION_FILES.list = async options => { lists++; return list(options); };
+  assert.equal((await api(fixture, '/api/storage/usage')).body.used_bytes, 7);
+  assert.equal(fixture.sql.prepare("SELECT file_bytes FROM submissions WHERE id='legacy'").get().file_bytes, 7);
+  assert.equal(lists, 1);
+  assert.equal((await api(fixture, '/api/submissions', 'POST', submissionForm({ count: 2 }))).status, 201);
+  assert.equal((await api(fixture, '/api/storage/usage')).body.used_bytes, 9);
+  assert.equal(lists, 1);
+  assert.equal((await api(fixture, '/api/submissions', 'POST', submissionForm())).status, 201);
+  assert.equal((await api(fixture, '/api/storage/usage')).body.used_bytes, 8);
+});
+
+test('text fields over their limits are rejected with Indonesian messages', async t => {
+  const fixture = await createWorkerEnv(); t.after(() => fixture.sql.close()); seedTask(fixture.sql);
+  const task = new FormData();
+  task.set('title', 'J'.repeat(201)); task.set('subject', 'Uji'); task.set('deadline', '2030-01-01T10:00');
+  assert.deepEqual(await api(fixture, '/api/tasks', 'POST', task), { status: 400, body: { error: 'Judul maksimal 200 karakter.' } });
+  assert.equal((await api(fixture, '/api/tasks/task', 'PUT', { title: 'Uji', subject: 'Uji', deadline: '2030-01-01T10:00', description: 'D'.repeat(5001) })).body.error, 'Deskripsi maksimal 5000 karakter.');
+  assert.equal((await api(fixture, '/api/classes', 'POST', { name: 'K'.repeat(101) })).body.error, 'Nama kelas maksimal 100 karakter.');
+  const klass = (await api(fixture, '/api/classes', 'POST', { name: 'Kelas' })).body.class;
+  assert.equal((await api(fixture, `/api/classes/${klass.id}/students`, 'PUT', { names: ['Budi', 'S'.repeat(101)] })).body.error, 'Nama siswa maksimal 100 karakter.');
+  const note = submissionForm(); note.set('student_note', 'n'.repeat(1001));
+  assert.equal((await api(fixture, '/api/submissions', 'POST', note)).body.error, 'Catatan maksimal 1000 karakter.');
+  assert.equal((await api(fixture, '/api/submissions', 'POST', submissionForm({ name: 'N'.repeat(101) }))).body.error, 'Nama siswa maksimal 100 karakter.');
+  assert.equal(fixture.objects.size, 0);
+});

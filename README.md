@@ -24,7 +24,7 @@ npm test
 | Area | Perilaku |
 | --- | --- |
 | Beranda | Siswa mencari tugas dengan kode 6 digit; guru login dengan email dan password. |
-| Dasbor guru | Menampilkan kuota 10 GB, daftar tugas, buat tugas, unduh semua tugas, hapus semua tugas. |
+| Dasbor guru | Menampilkan kuota 10 GB, daftar tugas, buat tugas, unduh semua tugas, hapus semua tugas. Mulai 10 tugas muncul kotak pencarian (judul, mapel, kode); daftar ditampilkan 50 per langkah lewat tombol **Tampilkan 50 lagi**. Halaman Kelas memakai pola yang sama. |
 | Kelas | Buat, ubah nama, dan hapus kelas; seluruh nama siswa ditampilkan dalam satu kotak teks (satu per baris). Tombol **Simpan daftar** menambah nama baru dan menghapus nama yang dihilangkan dari kotak. |
 | Buat tugas | Judul, mata pelajaran, deadline, deskripsi opsional, jenis kiriman gambar/video/audio, target satu atau beberapa kelas, lampiran soal opsional. Tanpa target kelas, formulir siswa menerima kelas dan nama bebas. |
 | Detail tugas | Kode dan tautan siswa, QR, lampiran soal, total pengumpulan, tepat waktu, terlambat, belum mengumpulkan, filter kelas, pratinjau, unduh per siswa dan massal, hapus tugas. Tombol **Lihat Semua** membuka satu halaman gulir berisi seluruh kiriman: dikelompokkan menurut nama siswa dan kelas, lalu setiap lembar foto diberi `Halaman i dari n`. Video dan audio tampil dengan pemutar dan urutan file. |
@@ -65,6 +65,10 @@ ZIP produksi yang diuji berisi 28 MP3 di `IX.1/Tepat Waktu/`, satu berkas per si
 Perubahan frontend dibangun dengan `npm run build`. Skrip `scripts/build-frontend.mjs` memakai bundle dasar yang disimpan di `public/assets`, menerapkan perubahan perilaku, lalu menghasilkan nama aset berdasarkan konten. Logika waktu WIB, identitas kelas, pengambilan siswa, dan ekspor ZIP ada di `public/assets/app-logic.mjs`. Aturan berkas, validasi tugas, dan query yang dipakai bersama oleh `server.mjs` dan `worker.mjs` ada di `api-shared.mjs`; deploy Worker harus menyertakan modul ini. Jalankan `npm test` setelah perubahan.
 
 Migrasi `migrations/001-submission-identity.sql` menambahkan identitas kelas pada kiriman dan indeks unik untuk unggahan ulang. Server lokal menjalankannya otomatis dalam satu transaksi jika indeks `submission_identity` belum ada; kiriman ganda lama disisakan yang terbaru agar indeks dapat dibuat; D1 produksi sudah dimigrasikan pada 5 Oktober 2026. Jangan menjalankan `ALTER TABLE` tersebut dua kali. Deadline tanpa zona dibaca sebagai WIB; waktu pembuatan lama dari SQLite dibaca sebagai UTC. Unggahan ulang mengganti kiriman sebelumnya secara atomik, dan ZIP dibatalkan jika satu berkas gagal diunduh. Batas unggahan adalah 20 berkas, 50 MB per gambar, dan 100 MB per audio/video.
+
+Batas panjang isian (`TEXT_LIMITS` di `api-shared.mjs`, juga dipasang sebagai `maxLength` di formulir): judul 200, mata pelajaran 100, deskripsi 5000, nama kelas 100, nama siswa 100, catatan 1000 karakter. API menolak isian yang lebih panjang dengan pesan berbahasa Indonesia. Di detail tugas, tabel kiriman dan tabel Belum punya pencarian serta tampil 50 per langkah; nama dan kelas dipotong tiga baris (teks lengkap di tooltip dan di penampil), catatan panjang dibuka lewat **lihat catatan**, dan filter kelas berubah menjadi dropdown bila lebih dari 8 kelas.
+
+Migrasi `migrations/002-file-bytes.sql` menambahkan kolom `file_bytes` pada `tasks` dan `submissions` untuk D1. Worker mengisi kolom ini saat unggah dan menghitung kuota dengan `SUM`, sehingga bucket R2 tidak lagi didaftar pada setiap unggahan. Baris lama yang masih `NULL` diisi sekali dengan membaca daftar bucket. Migrasi ini wajib dijalankan di D1 sebelum Worker baru dideploy: `npx wrangler d1 execute tugas-db --remote --file migrations/002-file-bytes.sql`. Server lokal tetap menghitung kuota dari ukuran berkas di disk dan tidak memerlukan kolom ini.
 
 Server melayani endpoint yang dipanggil frontend asli:
 

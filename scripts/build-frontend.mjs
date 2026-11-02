@@ -27,6 +27,28 @@ entry = `import { isLate as taskIsLate, addSubmissionFiles as archiveSubmissionF
 chunk = `import { createStudentLoader as studentListLoader, deadlineTimestamp as taskDeadlineTimestamp } from './${helperName}';\n` + chunk;
 const editor = (await transform(await read('scripts/frontend/task-editor.jsx'), { loader: 'jsx', jsxFactory: 'pe.createElement', jsxFragment: 'pe.Fragment' })).code.replaceAll('pe.createElement', 'Ye.createElement');
 entry += '\n' + editor;
+// Dasbor dan halaman Kelas: pencarian dan tampil bertahap per 50 untuk ribuan item.
+entry = replaceOnce(entry, '  Ye.useEffect(() => {\n    if (r !== "/dashboard") return;', '  const taskList = useListWindow(u, task => [task.title, task.subject, task.task_code]);\n  Ye.useEffect(() => {\n    if (r !== "/dashboard") return;');
+entry = replaceOnce(entry, 'pe.jsx("div", { className: "task-list", children: u.map((M) => pe.jsxs(Ju, {', 'pe.jsxs(pe.Fragment, { children: [pe.jsx(ListSearch, { list: taskList, label: "Cari tugas", placeholder: "Cari judul, mata pelajaran, atau kode" }), pe.jsx("div", { className: "task-list", children: taskList.shown.map((M) => pe.jsxs(Ju, {');
+entry = replaceOnce(entry, '}, M.id)) }), h && pe.jsx("div", { className: "modal active"', '}, M.id)) }), pe.jsx(ListMore, { list: taskList })] }), h && pe.jsx("div", { className: "modal active"');
+entry = replaceOnce(entry, '= K2(Na.classes, Z2), o = r ?? [],', '= K2(Na.classes, Z2), o = r ?? [], classList = useListWindow(o, klass => [klass.name]),');
+entry = replaceOnce(entry, 'pe.jsx("div", { className: "task-list", children: o.map((P) => pe.jsx("div", { className: "task-item", onClick: () => V(P)', 'pe.jsxs(pe.Fragment, { children: [pe.jsx(ListSearch, { list: classList, label: "Cari kelas", placeholder: "Cari nama kelas" }), pe.jsx("div", { className: "task-list", children: classList.shown.map((P) => pe.jsx("div", { className: "task-item", onClick: () => V(P)');
+entry = replaceOnce(entry, '}, P.id)) }), l && pe.jsx("div", { className: "modal active"', '}, P.id)) }), pe.jsx(ListMore, { list: classList })] }), l && pe.jsx("div", { className: "modal active"');
+// Detail tugas: filter kelas ringkas, tabel pengumpulan tahan teks panjang.
+entry = replaceOnce(entry, 'ie && pe.jsxs("div", { className: "class-filter-bar", children: [pe.jsx("button", { type: "button", className: `class-filter-btn${b === "all" ? " active" : ""}`, onClick: () => V("all"), children: "Semua Kelas" }), U.map((d) => pe.jsx("button", { type: "button", className: `class-filter-btn${b === d.id ? " active" : ""}`, onClick: () => V(d.id), children: d.name }, d.id))] })', 'ie && pe.jsx(ClassFilter, { classes: U, value: b, onChange: V })');
+// Tabel kiriman dan tabel Belum diganti versi di long-lists.jsx (pencarian, tampil bertahap, teks panjang).
+entry = replaceFunction(entry, 'Av', '');
+entry = replaceFunction(entry, 'xy', '');
+entry += '\n' + (await transform(await read('scripts/frontend/long-lists.jsx'), { loader: 'jsx', jsxFactory: 'pe.createElement', jsxFragment: 'pe.Fragment' })).code.replaceAll('pe.createElement', 'Ye.createElement').replaceAll('pe.Fragment', 'Ye.Fragment');
+// Penampil media: judul panjang dipatah dan dibatasi dua baris.
+entry = replaceOnce(entry, 'pe.jsx("div", { style: { fontWeight: 600, fontSize: 14 }, children: s }), pe.jsx("button", { type: "button", className: "btn btn-outline btn-inline", style: { fontSize: 12, padding: "6px 14px" }, onClick: t, children: "Tutup" })', 'pe.jsx("div", { className: "viewer-title", title: s, style: { fontWeight: 600, fontSize: 14 }, children: s }), pe.jsx("button", { type: "button", className: "btn btn-outline btn-inline", style: { fontSize: 12, padding: "6px 14px" }, onClick: t, children: "Tutup" })');
+entry = replaceOnce(entry, 'pe.jsx("div", { style: { maxWidth: 720, margin: "0 auto", padding: 20 }, children: a4.map((o, l) =>', 'pe.jsx("div", { className: "viewer-body", style: { maxWidth: 720, margin: "0 auto", padding: 20 }, children: a4.map((o, l) =>');
+// Batas panjang isian sama dengan TEXT_LIMITS di api-shared.mjs.
+entry = replaceOnce(entry, 'id: "taskTitleInput", value: y,', 'id: "taskTitleInput", maxLength: TEXT_LIMITS.title, value: y,');
+entry = replaceOnce(entry, 'id: "taskSubjectInput", value: N,', 'id: "taskSubjectInput", maxLength: TEXT_LIMITS.subject, value: N,');
+entry = replaceOnce(entry, 'pe.jsx("textarea", { value: T, onChange: (M) => x(M.target.value), rows: 3 }', 'pe.jsx("textarea", { value: T, maxLength: TEXT_LIMITS.description, onChange: (M) => x(M.target.value), rows: 3 }');
+entry = replaceOnce(entry, 'id: "classNameInput", value: f,', 'id: "classNameInput", maxLength: TEXT_LIMITS.className, value: f,');
+entry = replaceOnce(entry, 'id: "studentModalClassNameInput", className: "class-name-input", value: S,', 'id: "studentModalClassNameInput", className: "class-name-input", maxLength: TEXT_LIMITS.className, value: S,');
 entry = replaceOnce(entry, 'function Sy() {', `function Sy() {
   const [editingTask, setEditingTask] = Ye.useState(false);
   const [savedTask, setSavedTask] = Ye.useState(null);`);
@@ -91,6 +113,9 @@ chunk = replaceOnce(chunk, 'd("saving"), I("Menyimpan ke server...");', 'd("prog
 chunk = replaceOnce(chunk, 'function ze() {', 'function ze() { const [uploadPercent, setUploadPercent] = t.useState(0);');
 chunk = replaceOnce(chunk, 'onRetry: (x, _) => {', 'onProgress: setUploadPercent, onSaving: () => { d("saving"); I("Menyimpan ke server..."); }, onRetry: (x, _) => { setUploadPercent(0);');
 chunk = replaceOnce(chunk, 'phase: z,', 'phase: z, percent: uploadPercent,');
+chunk = replaceOnce(chunk, 'id: "studentNote", rows: 2,', 'id: "studentNote", maxLength: 1000, rows: 2,');
+chunk = replaceOnce(chunk, 'id: "studentClass", required: true, placeholder: "Contoh: XII IPA 1",', 'id: "studentClass", required: true, maxLength: 100, placeholder: "Contoh: XII IPA 1",');
+chunk = replaceOnce(chunk, 'id: "studentName", required: true, placeholder: "Nama lengkap",', 'id: "studentName", required: true, maxLength: 100, placeholder: "Nama lengkap",');
 const chunkCode = (await transform(chunk, { minifyWhitespace: true, minifySyntax: true, minifyIdentifiers: false, legalComments: 'none' })).code;
 const chunkName = `SubmitPage-${hash(chunkCode)}.js`;
 await write(`public/assets/${chunkName}`, chunkCode);
@@ -98,10 +123,13 @@ entry = replaceOnce(entry, './SubmitPage-B4ZWda05.js', './' + chunkName);
 const entryCode = (await transform(entry, { minifyWhitespace: true, minifySyntax: true, minifyIdentifiers: false, legalComments: 'none' })).code;
 const entryName = `index-${hash(entryCode)}.js`;
 await write(`public/assets/${entryName}`, entryCode);
+const css = await read('public/assets/index-Dv3Ww8pd.css') + '\n' + await read('scripts/frontend/overrides.css');
+const cssName = `index-${hash(css)}.css`;
+await write(`public/assets/${cssName}`, css);
 const html = await read('public/index.html');
-await write('public/index.html', html.replace(/src="\/assets\/index-[^"/]+\.js"/, `src="/assets/${entryName}"`));
+await write('public/index.html', html.replace(/src="\/assets\/index-[^"/]+\.js"/, `src="/assets/${entryName}"`).replace(/href="\/assets\/index-[^"/]+\.css"/, `href="/assets/${cssName}"`));
 await write('public/assets/index-Ci25O57r.js', `export * from './${entryName}';\n`);
 const worker = await read('worker.mjs');
 await write('worker.mjs', worker.replace(/export \* from '\.\/index-[^']+\.js';/, `export * from './${entryName}';`));
 await build({ entryPoints: [new URL(`public/assets/${entryName}`, root).pathname], bundle: true, write: false, platform: 'browser', logLevel: 'error' });
-console.log(JSON.stringify({ entryName, chunkName, helperName }));
+console.log(JSON.stringify({ entryName, chunkName, helperName, cssName }));

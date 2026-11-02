@@ -1,5 +1,5 @@
 import { compareFileFields, taskDates, submissionDates, utcTimestamp } from './public/assets/app-logic.mjs';
-import { SQL, STORAGE_LIMIT_BYTES, MAX_SUBMISSION_FILES, MAX_IMAGE_BYTES, MAX_FILE_BYTES, fileUrls, isInlineContentType, isSubmissionType, parseClassIds, safeFileName, submissionFile, taskCode, taskFields, withClasses } from './api-shared.mjs';
+import { SQL, STORAGE_LIMIT_BYTES, MAX_SUBMISSION_FILES, MAX_IMAGE_BYTES, MAX_FILE_BYTES, fileUrls, isInlineContentType, isSubmissionType, parseClassIds, safeFileName, submissionFile, taskCode, taskFields, textTooLong, withClasses } from './api-shared.mjs';
 
 const TASK_PUBLIC = 'https://pub-8f313bb90a194fc185f0e4319a7201dd.r2.dev';
 const SUBMISSION_PUBLIC = 'https://pub-76de1050ffe64a1bb900d33b4a48c3be.r2.dev';
@@ -59,31 +59,46 @@ function fileLocation(url) {
     return bucket && key && !key.includes('..') ? { bucket, key } : null;
   } catch { return null; }
 }
-// Ukuran tiap objek ikut dikembalikan agar ukuran kiriman lama tidak perlu dibaca ulang satu per satu.
-async function usage(db, env, teacherId) {
-  const keys = new Map();
-  for (const url of await teacherUrls(db, teacherId)) {
-    const place = fileLocation(url);
-    if (!place) continue;
-    if (!keys.has(place.bucket)) keys.set(place.bucket, new Map());
-    const bucketKeys = keys.get(place.bucket);
-    bucketKeys.set(place.key, (bucketKeys.get(place.key) || 0) + 1);
+// Ukuran berkas disimpan di kolom file_bytes saat diunggah, jadi kuota cukup dihitung dengan SUM.
+// Baris lama (file_bytes NULL) diisi sekali dengan membaca daftar bucket, lalu tidak pernah dibaca lagi.
+const LEGACY_SIZE_ROWS = `SELECT 'tasks' AS tbl,id,file_url FROM tasks WHERE teacher_id=? AND file_url IS NOT NULL AND file_bytes IS NULL
+  UNION ALL SELECT 'submissions',s.id,s.file_url FROM submissions s JOIN tasks t ON t.id=s.task_id WHERE t.teacher_id=? AND s.file_bytes IS NULL`;
+const USAGE_TOTAL = `SELECT (SELECT coalesce(sum(file_bytes),0) FROM tasks WHERE teacher_id=?)
+  + (SELECT coalesce(sum(s.file_bytes),0) FROM submissions s JOIN tasks t ON t.id=s.task_id WHERE t.teacher_id=?) AS total`;
+async function backfillFileBytes(db, env, teacherId) {
+  const rows = await all(db, LEGACY_SIZE_ROWS, teacherId, teacherId);
+  if (!rows.length) return;
+  const wanted = new Map();
+  for (const row of rows) for (const place of fileUrls(row.file_url).map(fileLocation).filter(Boolean)) {
+    if (!wanted.has(place.bucket)) wanted.set(place.bucket, new Set());
+    wanted.get(place.bucket).add(place.key);
   }
   const sizes = new Map();
-  let total = 0;
-  await Promise.all([...keys].map(async ([bucket, remaining]) => {
+  await Promise.all([...wanted].map(async ([bucket, remaining]) => {
     let cursor;
     do {
       const page = await env[bucket].list({ limit: 1000, ...(cursor ? { cursor } : {}) });
-      for (const object of page.objects) {
-        const references = remaining.get(object.key);
-        if (references) { total += object.size * references; sizes.set(`${bucket}/${object.key}`, object.size); remaining.delete(object.key); }
-      }
+      for (const object of page.objects) if (remaining.delete(object.key)) sizes.set(`${bucket}/${object.key}`, object.size);
       cursor = page.truncated ? page.cursor : undefined;
     } while (cursor && remaining.size);
   }));
-  return { total, sizes };
+  // Berkas yang sudah tidak ada dihitung 0 byte, sama seperti perhitungan sebelumnya.
+  const bytesOf = row => fileUrls(row.file_url).map(fileLocation).filter(Boolean).reduce((n, place) => n + (sizes.get(`${place.bucket}/${place.key}`) || 0), 0);
+  // Satu UPDATE per tabel per 2000 baris, agar tidak melewati batas jumlah query D1 per permintaan.
+  const updates = [];
+  for (const table of ['tasks', 'submissions']) {
+    const values = rows.filter(row => row.tbl === table).map(row => ({ id: row.id, bytes: bytesOf(row) }));
+    for (let i = 0; i < values.length; i += 2000) {
+      updates.push(db.prepare(`UPDATE ${table} SET file_bytes=(SELECT json_extract(j.value,'$.bytes') FROM json_each(?1) j WHERE json_extract(j.value,'$.id')=${table}.id) WHERE file_bytes IS NULL AND id IN (SELECT json_extract(value,'$.id') FROM json_each(?1))`).bind(JSON.stringify(values.slice(i, i + 2000))));
+    }
+  }
+  await db.batch(updates);
 }
+async function usage(db, env, teacherId) {
+  await backfillFileBytes(db, env, teacherId);
+  return (await one(db, USAGE_TOTAL, teacherId, teacherId)).total;
+}
+const UPSERT_SUBMISSION = 'INSERT INTO submissions(id,task_id,student_name,student_class,class_id,student_note,file_url,created_at,file_bytes) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT DO UPDATE SET student_name=excluded.student_name,student_class=excluded.student_class,class_id=excluded.class_id,student_note=excluded.student_note,file_url=excluded.file_url,created_at=excluded.created_at,file_bytes=excluded.file_bytes';
 async function deleteFiles(env, list) {
   for (const url of list) {
     const place = fileLocation(url);
@@ -131,7 +146,7 @@ async function route(request, env) {
   }
   if (!path.startsWith('/api/')) {
     if (path === '/assets/index-Ci25O57r.js' && (method === 'GET' || method === 'HEAD')) {
-      return new Response("export * from './index-a49c49e6.js';\n", { headers: {
+      return new Response("export * from './index-6780e01e.js';\n", { headers: {
         'Content-Type': 'application/javascript; charset=utf-8',
         'Cache-Control': 'no-store',
       } });
@@ -161,6 +176,8 @@ async function route(request, env) {
   if (path === '/api/classes' && method === 'POST') {
     const name = String((await body()).name || '').trim();
     if (!name) return fail(400, 'Nama kelas wajib diisi.');
+    const tooLong = textTooLong({ className: name });
+    if (tooLong) return fail(400, tooLong);
     if (await one(db, 'SELECT id FROM classes WHERE teacher_id=? AND name=?', teacher.id, name)) return fail(409, 'Kelas sudah ada.');
     const id = crypto.randomUUID();
     await run(db, 'INSERT INTO classes(id,teacher_id,name) VALUES(?,?,?)', id, teacher.id, name);
@@ -173,6 +190,8 @@ async function route(request, env) {
     if (method === 'PUT') {
       const name = String((await body()).name || '').trim();
       if (!name) return fail(400, 'Nama kelas wajib diisi.');
+      const tooLong = textTooLong({ className: name });
+      if (tooLong) return fail(400, tooLong);
       if (await one(db, 'SELECT id FROM classes WHERE teacher_id=? AND name=? AND id<>?', teacher.id, name, id)) return fail(409, 'Kelas sudah ada.');
       await db.batch([
         db.prepare('UPDATE classes SET name=? WHERE id=?').bind(name, id),
@@ -189,6 +208,8 @@ async function route(request, env) {
       const input = (await body()).names;
       if (!Array.isArray(input)) return fail(400, 'Daftar siswa tidak valid.');
       const names = input.map(name => String(name).trim()).filter(Boolean);
+      const tooLong = names.map(studentName => textTooLong({ studentName })).find(Boolean);
+      if (tooLong) return fail(400, tooLong);
       if (new Set(names.map(name => name.toLocaleLowerCase('id'))).size !== names.length) return fail(400, 'Nama siswa tidak boleh berulang.');
       const existing = await all(db, SQL.students, id);
       const wanted = new Set(names);
@@ -213,18 +234,20 @@ async function route(request, env) {
     const form = await request.formData();
     const fields = taskFields(Object.fromEntries(form)), type = String(form.get('submission_type') || 'image');
     if (!fields || !isSubmissionType(type)) return fail(400, 'Lengkapi judul, mata pelajaran, dan deadline.');
+    const tooLong = textTooLong({ title: fields.title, subject: fields.subject, description: fields.description });
+    if (tooLong) return fail(400, tooLong);
     const classIds = parseClassIds(form.get('classes'));
     if (!classIds) return fail(400, 'Daftar kelas tidak valid.');
     if ((await one(db, SQL.ownedClassCount, teacher.id, JSON.stringify(classIds))).n !== classIds.length) return fail(400, 'Kelas tidak ditemukan.');
     const file = form.get('file'), attachment = isFile(file) && file.size ? file : null;
-    if (attachment && (await usage(db, env, teacher.id)).total + attachment.size > STORAGE_LIMIT_BYTES) return fail(413, 'Kapasitas penyimpanan sudah penuh.');
+    if (attachment && await usage(db, env, teacher.id) + attachment.size > STORAGE_LIMIT_BYTES) return fail(413, 'Kapasitas penyimpanan sudah penuh.');
     let code;
     do { code = taskCode(); } while (await one(db, SQL.taskByCode, code));
     const id = crypto.randomUUID();
     let fileUrl = null;
     if (attachment) { const key = `${Date.now()}_${crypto.randomUUID().slice(0, 8)}_${safeFileName(attachment.name)}`; await env.TASK_FILES.put(key, attachment.stream(), { httpMetadata: { contentType: attachment.type || 'application/octet-stream' } }); fileUrl = `${SITE_ORIGIN}/media/task/${encodeURIComponent(key)}`; }
     await db.batch([
-      db.prepare('INSERT INTO tasks(id,teacher_id,title,description,subject,deadline,file_url,task_code,submission_type) VALUES(?,?,?,?,?,?,?,?,?)').bind(id, teacher.id, fields.title, fields.description, fields.subject, fields.deadline, fileUrl, code, type),
+      db.prepare('INSERT INTO tasks(id,teacher_id,title,description,subject,deadline,file_url,task_code,submission_type,file_bytes) VALUES(?,?,?,?,?,?,?,?,?,?)').bind(id, teacher.id, fields.title, fields.description, fields.subject, fields.deadline, fileUrl, code, type, attachment ? attachment.size : null),
       db.prepare(SQL.linkTaskClasses).bind(id, JSON.stringify(classIds)),
     ]);
     return json({ task: await taskFor(db, await one(db, 'SELECT * FROM tasks WHERE id=?', id)) }, 201);
@@ -250,6 +273,8 @@ async function route(request, env) {
     if (method === 'PUT') {
       const fields = taskFields(await body());
       if (!fields) return fail(400, 'Lengkapi judul, mata pelajaran, dan deadline.');
+      const tooLong = textTooLong({ title: fields.title, subject: fields.subject, description: fields.description });
+      if (tooLong) return fail(400, tooLong);
       await run(db, 'UPDATE tasks SET title=?,subject=?,description=?,deadline=? WHERE id=?', fields.title, fields.subject, fields.description, fields.deadline, task.id);
       return json({ task: await taskFor(db, { ...task, ...fields }) });
     }
@@ -276,16 +301,21 @@ async function route(request, env) {
     }
     const files = [...form.entries()].filter(([, value]) => isFile(value)).sort(([a], [b]) => compareFileFields(a, b)).map(([, value]) => value);
     if (!name || !klass || !files.length) return fail(400, 'Lengkapi nama, kelas, dan file tugas.');
+    const note = String(form.get('student_note') || '').trim();
+    // Nama dan kelas dari daftar kelas sudah diperiksa saat daftar disimpan.
+    const tooLong = textTooLong(classId ? { studentNote: note } : { studentName: name, className: klass, studentNote: note });
+    if (tooLong) return fail(400, tooLong);
     if (files.length > MAX_SUBMISSION_FILES) return fail(400, 'Maksimal 20 file per pengumpulan.');
     const accepted = files.map(file => submissionFile(task.submission_type, file.name, file.type));
     if (accepted.includes(null)) return fail(400, 'Jenis file tidak sesuai dengan tugas.');
     if (task.submission_type === 'image' && files.some(file => file.size > MAX_IMAGE_BYTES)) return fail(413, 'Foto maksimal 50 MB per file.');
     if (files.some(file => file.size > MAX_FILE_BYTES)) return fail(413, 'File maksimal 100 MB per file.');
     const identity = [task.id, name, classId, klass];
-    const previous = await one(db, SQL.previousSubmission, ...identity);
+    // usage() lebih dulu agar file_bytes kiriman lama sudah terisi saat dibaca.
     const current = await usage(db, env, task.teacher_id);
-    const replaced = fileUrls(previous?.file_url).map(fileLocation).filter(Boolean).reduce((n, place) => n + (current.sizes.get(`${place.bucket}/${place.key}`) || 0), 0);
-    if (current.total - replaced + files.reduce((n, f) => n + f.size, 0) > STORAGE_LIMIT_BYTES) return fail(413, 'Kapasitas penyimpanan sudah penuh.');
+    const previous = await one(db, SQL.previousSubmission, ...identity);
+    const incoming = files.reduce((n, f) => n + f.size, 0);
+    if (current - (previous?.file_bytes || 0) + incoming > STORAGE_LIMIT_BYTES) return fail(413, 'Kapasitas penyimpanan sudah penuh.');
     const stored = [];
     let replacedSubmission;
     try {
@@ -297,7 +327,7 @@ async function route(request, env) {
       // Kiriman lama dibaca ulang di batch yang sama agar unggahan ulang bersamaan tetap atomik.
       const result = await db.batch([
         db.prepare(SQL.previousSubmission).bind(...identity),
-        db.prepare(SQL.upsertSubmission).bind(crypto.randomUUID(), task.id, name, klass, classId, String(form.get('student_note') || '').trim(), JSON.stringify(stored), now()),
+        db.prepare(UPSERT_SUBMISSION).bind(crypto.randomUUID(), task.id, name, klass, classId, note, JSON.stringify(stored), now(), incoming),
       ]);
       replacedSubmission = result[0].results[0];
     } catch (error) {
@@ -307,7 +337,7 @@ async function route(request, env) {
     if (replacedSubmission) await deleteFiles(env, fileUrls(replacedSubmission.file_url)).catch(error => console.error(error));
     return json({ file_urls: stored, replaced: !!replacedSubmission }, 201);
   }
-  if (path === '/api/storage/usage' && method === 'GET') return json({ used_bytes: (await usage(db, env, teacher.id)).total });
+  if (path === '/api/storage/usage' && method === 'GET') return json({ used_bytes: await usage(db, env, teacher.id) });
   if (path === '/api/files/blob' && method === 'GET') {
     const requested = url.searchParams.get('url') || '';
     if (!(await teacherUrls(db, teacher.id)).includes(requested)) return fail(404, 'File tidak ditemukan.');

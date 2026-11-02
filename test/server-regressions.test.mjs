@@ -66,3 +66,20 @@ test('editing a task without a JSON body is a validation error, not a crash', as
   const response = await fetch(base + `/api/tasks/${task.id}`, { method: 'PUT', headers: auth });
   assert.equal(response.status, 400);
 });
+
+test('text fields over their limits are rejected with Indonesian messages', async () => {
+  const post = (path, body) => fetch(base + path, { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.json());
+  const form = new FormData();
+  form.set('title', 'Uji'); form.set('subject', 'M'.repeat(101)); form.set('deadline', '2030-01-01T10:00');
+  assert.equal((await (await fetch(base + '/api/tasks', { method: 'POST', headers: auth, body: form })).json()).error, 'Mata pelajaran maksimal 100 karakter.');
+  assert.equal((await post('/api/classes', { name: 'K'.repeat(101) })).error, 'Nama kelas maksimal 100 karakter.');
+  const task = await createTask('image');
+  const huge = submission(task, { blob: new Blob(['x'], { type: 'image/png' }), name: 'a.png' }, 'Siswa Catatan');
+  huge.set('student_note', 'n'.repeat(200 * 1024));
+  const response = await fetch(base + '/api/submissions', { method: 'POST', body: huge });
+  assert.equal(response.status, 400);
+  assert.equal((await response.json()).error, 'Isian teks terlalu panjang.');
+  const long = submission(task, { blob: new Blob(['x'], { type: 'image/png' }), name: 'a.png' }, 'Siswa Catatan');
+  long.set('student_note', 'n'.repeat(1001));
+  assert.equal((await (await fetch(base + '/api/submissions', { method: 'POST', body: long })).json()).error, 'Catatan maksimal 1000 karakter.');
+});

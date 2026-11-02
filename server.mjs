@@ -8,7 +8,7 @@ import { mkdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { compareFileFields, deadlineTimestamp, taskDates, submissionDates } from './public/assets/app-logic.mjs';
-import { SQL, STORAGE_LIMIT_BYTES, MAX_IMAGE_BYTES, fileUrls, isInlineFile, isSubmissionType, parseClassIds, safeFileName, submissionFile, taskCode, taskFields, withClasses } from './api-shared.mjs';
+import { SQL, STORAGE_LIMIT_BYTES, MAX_IMAGE_BYTES, fileUrls, isInlineFile, isSubmissionType, parseClassIds, safeFileName, submissionFile, taskCode, taskFields, textTooLong, withClasses } from './api-shared.mjs';
 
 const root = fileURLToPath(new URL('.', import.meta.url));
 const dataDir = resolve(process.env.DATA_DIR || join(root, 'data'));
@@ -110,7 +110,8 @@ app.use('/assets', express.static(join(root, 'public/assets'), {
 }));
 const upload = multer({
   storage: multer.diskStorage({ destination: uploadDir, filename: (_req, _file, callback) => callback(null, randomUUID()) }),
-  limits: { files: 20, fileSize: 100 * 1024 * 1024 },
+  // Isian teks terpanjang (deskripsi 5000 karakter) jauh di bawah 100 KB.
+  limits: { files: 20, fileSize: 100 * 1024 * 1024, fieldSize: 100 * 1024 },
 });
 app.use((req, res, next) => {
   res.on('finish', () => removeFiles([...(req.files || []), ...(req.file ? [req.file] : [])].map(file => file.path)));
@@ -150,6 +151,8 @@ app.get('/api/classes', requireTeacher, (req, res) => res.json({ classes: db.pre
 app.post('/api/classes', requireTeacher, (req, res) => {
   const name = String(req.body.name || '').trim();
   if (!name) return fail(res, 400, 'Nama kelas wajib diisi.');
+  const tooLong = textTooLong({ className: name });
+  if (tooLong) return fail(res, 400, tooLong);
   try {
     const id = randomUUID();
     db.prepare('INSERT INTO classes VALUES (?,?,?)').run(id, req.teacher.id, name);
@@ -160,6 +163,8 @@ app.put('/api/classes/:id', requireTeacher, (req, res) => {
   if (!ownedClass(req)) return fail(res, 404, 'Kelas tidak ditemukan.');
   const name = String(req.body.name || '').trim();
   if (!name) return fail(res, 400, 'Nama kelas wajib diisi.');
+  const tooLong = textTooLong({ className: name });
+  if (tooLong) return fail(res, 400, tooLong);
   db.exec('BEGIN');
   try {
     db.prepare('UPDATE classes SET name=? WHERE id=?').run(name, req.params.id);
@@ -181,6 +186,8 @@ app.put('/api/classes/:id/students', requireTeacher, (req, res) => {
   if (!ownedClass(req)) return fail(res, 404, 'Kelas tidak ditemukan.');
   if (!Array.isArray(req.body.names)) return fail(res, 400, 'Daftar siswa tidak valid.');
   const names = req.body.names.map(name => String(name).trim()).filter(Boolean);
+  const tooLong = names.map(studentName => textTooLong({ studentName })).find(Boolean);
+  if (tooLong) return fail(res, 400, tooLong);
   if (new Set(names.map(name => name.toLocaleLowerCase('id'))).size !== names.length) return fail(res, 400, 'Nama siswa tidak boleh berulang.');
   const existing = studentsOf(req.params.id);
   const wanted = new Set(names);
@@ -209,6 +216,8 @@ app.post('/api/tasks', requireTeacher, upload.single('file'), (req, res) => {
   const fields = taskFields(req.body);
   const submissionType = req.body.submission_type || 'image';
   if (!fields || !isSubmissionType(submissionType)) return fail(res, 400, 'Lengkapi judul, mata pelajaran, dan deadline.');
+  const tooLong = textTooLong({ title: fields.title, subject: fields.subject, description: fields.description });
+  if (tooLong) return fail(res, 400, tooLong);
   const classIds = parseClassIds(req.body.classes);
   if (!classIds) return fail(res, 400, 'Daftar kelas tidak valid.');
   if (db.prepare(SQL.ownedClassCount).get(req.teacher.id, JSON.stringify(classIds)).n !== classIds.length) return fail(res, 400, 'Kelas tidak ditemukan.');
@@ -246,6 +255,8 @@ app.put('/api/tasks/:id', requireTeacher, (req, res) => {
   if (!task) return fail(res, 404, 'Tugas tidak ditemukan.');
   const fields = taskFields(req.body);
   if (!fields) return fail(res, 400, 'Lengkapi judul, mata pelajaran, dan deadline.');
+  const tooLong = textTooLong({ title: fields.title, subject: fields.subject, description: fields.description });
+  if (tooLong) return fail(res, 400, tooLong);
   db.prepare('UPDATE tasks SET title=?,subject=?,description=?,deadline=? WHERE id=?').run(fields.title, fields.subject, fields.description, fields.deadline, task.id);
   res.json({ task: taskById(task.id) });
 });
@@ -270,6 +281,10 @@ app.post('/api/submissions', upload.any(), (req, res) => {
     ({ id: classId, name: studentClass } = selected);
   }
   if (!studentName || !studentClass || !req.files.length) return fail(res, 400, 'Lengkapi nama, kelas, dan file tugas.');
+  const studentNote = String(body.student_note || '').trim();
+  // Nama dan kelas dari daftar kelas sudah diperiksa saat daftar disimpan.
+  const tooLong = textTooLong(classId ? { studentNote } : { studentName, className: studentClass, studentNote });
+  if (tooLong) return fail(res, 400, tooLong);
   const files = req.files.sort((a, b) => compareFileFields(a.fieldname, b.fieldname));
   const accepted = files.map(file => submissionFile(task.submission_type, file.originalname, file.mimetype));
   if (accepted.includes(null)) return fail(res, 400, 'Jenis file tidak sesuai dengan tugas.');
@@ -281,7 +296,7 @@ app.post('/api/submissions', upload.any(), (req, res) => {
   const status = Date.now() > Date.parse(deadlineTimestamp(task.deadline)) ? 'Terlambat' : 'Tepat Waktu';
   const urls = files.map((file, index) => saveFile(file, ['submissions', task.id, studentClass, status], accepted[index].name));
   try {
-    db.prepare(SQL.upsertSubmission).run(randomUUID(), task.id, studentName, studentClass, classId, String(body.student_note || '').trim(), JSON.stringify(urls), now());
+    db.prepare(SQL.upsertSubmission).run(randomUUID(), task.id, studentName, studentClass, classId, studentNote, JSON.stringify(urls), now());
   } catch (error) { removeFiles(urls.map(localFile)); throw error; }
   removeFiles(previousFiles);
   res.status(201).json({ file_urls: urls, replaced: !!previous });
@@ -321,8 +336,15 @@ app.delete('/api/admin/teachers/:id', admin, (req, res) => {
 
 app.use('/api', (_req, res) => fail(res, 404, 'Endpoint tidak ditemukan.'));
 app.get(/.*/, (_req, res) => res.type('html').send(readFileSync(join(root, 'public/index.html'))));
+const MULTER_MESSAGES = {
+  LIMIT_FIELD_VALUE: 'Isian teks terlalu panjang.',
+  LIMIT_FILE_SIZE: 'File maksimal 100 MB per file.',
+  LIMIT_FILE_COUNT: 'Maksimal 20 file per pengumpulan.',
+  LIMIT_UNEXPECTED_FILE: 'Unggahan tidak valid.',
+};
 app.use((error, _req, res, _next) => {
-  if (error instanceof multer.MulterError) return fail(res, 400, error.message);
+  if (error instanceof multer.MulterError) return fail(res, error.code === 'LIMIT_FILE_SIZE' ? 413 : 400, MULTER_MESSAGES[error.code] || 'Unggahan tidak valid.');
+  if (error.type === 'entity.too.large') return fail(res, 413, 'Data yang dikirim terlalu besar.');
   if (error.status === 404) return fail(res, 404, 'File tidak ditemukan.');
   console.error(error);
   return fail(res, 500, 'Terjadi kesalahan server.');
