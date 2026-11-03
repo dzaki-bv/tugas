@@ -29,6 +29,7 @@ function ListSearch({ list, label, placeholder }) {
   if (list.total < LIST_SEARCH_MIN) return null;
   return <div className="list-search">
     <label className="visually-hidden" htmlFor={id}>{label}</label>
+    <Icon name="search" size={18} className="list-search-icon" />
     <input id={id} type="search" value={list.query} onChange={event => list.setQuery(event.target.value)} placeholder={placeholder} autoComplete="off" />
     <p className="list-count" aria-live="polite">{list.query.trim() ? `${list.matched} dari ${list.total} cocok` : `${list.total} total`}</p>
   </div>;
@@ -62,8 +63,8 @@ function ClassFilter({ classes, value, onChange }) {
     </div>;
   }
   return <div className="class-filter-bar">
-    <button type="button" className={`class-filter-btn${value === 'all' ? ' active' : ''}`} onClick={() => onChange('all')}>Semua Kelas</button>
-    {classes.map(klass => <button type="button" key={klass.id} className={`class-filter-btn${value === klass.id ? ' active' : ''}`} onClick={() => onChange(klass.id)}>{klass.name}</button>)}
+    <button type="button" className={`class-filter-btn${value === 'all' ? ' active' : ''}`} aria-pressed={value === 'all'} onClick={() => onChange('all')}>Semua Kelas</button>
+    {classes.map(klass => <button type="button" key={klass.id} className={`class-filter-btn${value === klass.id ? ' active' : ''}`} aria-pressed={value === klass.id} onClick={() => onChange(klass.id)}>{klass.name}</button>)}
   </div>;
 }
 
@@ -80,11 +81,11 @@ function Av({ rows, downloadIndex, onView, onDownload }) {
         return <tr key={row.id}>
           <td><div className="cell-clamp" title={row.student_name}>{row.student_name}</div>{row.student_note && <SubmissionNote note={row.student_note} />}</td>
           <td><div className="cell-clamp" title={row.student_class}>{row.student_class}</div></td>
-          <td>{wf(row.created_at)}</td>
-          <td>{group ? <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-            <button type="button" className="btn btn-outline btn-inline" style={{ fontSize: 12, padding: '5px 10px' }} onClick={() => onView(group)}>Lihat</button>
-            <button type="button" className="btn btn-accent btn-inline" style={{ fontSize: 12, padding: '5px 10px' }} onClick={() => onDownload(group)}>Unduh</button>
-          </div> : <span style={{ fontSize: 12, color: 'var(--text-3)' }}>—</span>}</td>
+          <td className="mono-cell">{wf(row.created_at)}</td>
+          <td>{group ? <div className="row-actions">
+            <button type="button" className="btn btn-outline btn-inline btn-sm" onClick={() => onView(group)} aria-label={`Lihat kiriman ${row.student_name}`}><Icon name="eye" size={16} />Lihat</button>
+            <button type="button" className="btn btn-inline btn-sm" onClick={() => onDownload(group)} aria-label={`Unduh kiriman ${row.student_name}`}><Icon name="download" size={16} />Unduh</button>
+          </div> : <span className="muted">—</span>}</td>
         </tr>;
       }) : <tr><td colSpan={4} className="text-center table-empty-cell">—</td></tr>}</tbody>
     </table></div></div>
