@@ -306,10 +306,6 @@ function SubmissionStats({ total, onTime, late, missing }) {
   </div>;
 }
 
-function StatusHeading({ status, count, className = '' }) {
-  return <h3 className={`status-heading ${className}`}><StatusChip status={status} /><span className="status-count mono">{count}</span></h3>;
-}
-
 async function copyStudentLink(link, showToast) {
   try {
     await navigator.clipboard.writeText(link);

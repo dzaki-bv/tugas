@@ -186,11 +186,44 @@ tbody tr:last-child td{border-bottom:0}
 .row-actions{display:flex;gap:6px;flex-wrap:wrap}
 .table-empty-cell{color:var(--text-3);font-size:14px}
 .submission-note{font-size:13px;color:var(--text-2)}
-.note-toggle{color:var(--primary-strong);font-weight:600}
+.note-toggle{display:inline;padding:0;border:0;background:none;font:inherit;color:var(--primary-strong);font-weight:600;text-decoration:underline;white-space:nowrap;cursor:pointer}
+.note-toggle:focus-visible{outline:2px solid var(--primary);outline-offset:2px;border-radius:2px}
+.submission-note-text{white-space:pre-wrap}
 .submission-note-full{background:var(--surface-2);border-color:var(--border)}
-.submission-columns{gap:16px;margin-top:8px}
-.status-heading{display:flex;align-items:center;gap:8px;margin:0 0 10px}
-.status-count{font-size:15px;font-weight:500;color:var(--text-2)}
+.table-container:has(>.submission-table){overflow-x:visible}
+.submission-table{table-layout:fixed;width:100%}
+.submission-table .col-name{width:auto}
+.submission-table .col-class{width:15%}
+.submission-table .col-status{width:132px}
+.submission-table .col-time{width:22%}
+.submission-table .col-actions{width:92px}
+.submission-table th{overflow-wrap:normal;word-break:normal;white-space:nowrap}
+.submission-table .chip{height:24px;padding:0 8px;gap:4px;font-size:12px}
+.time-compact{display:none}
+.status-filter{display:flex;flex-wrap:wrap}
+.status-filter-count{font-size:13px;opacity:.7}
+/* Mobile: kolom Status digabung ke kolom Waktu, waktu diringkas jadi dua baris. */
+@media (max-width:640px){
+  .submission-table .col-status{display:none}
+  .submission-table .col-class{width:64px}
+  .submission-table .col-time{width:96px}
+  .time-full{display:none}
+  .time-compact{display:flex;flex-direction:column;align-items:flex-start;gap:6px}
+  .time-short{display:flex;flex-direction:column;font-size:13px;line-height:18px;color:var(--text-2)}
+  .submission-table .chip{height:22px;padding:0 6px;font-size:11px}
+  .submission-table .chip svg{display:none}
+}
+.submission-table th:first-child,.submission-table td:first-child{padding-left:14px}
+.row-actions{flex-direction:column;flex-wrap:nowrap;gap:2px;margin:-8px 0}
+.row-action{display:flex;align-items:center;gap:6px;width:100%;min-height:40px;padding:0 6px;border:0;border-radius:6px;background:none;color:var(--text);font:inherit;font-size:14px;font-weight:600;white-space:nowrap;cursor:pointer}
+.row-action:hover{background:var(--green-pale);color:var(--green-dark)}
+.row-action:focus-visible{outline:2px solid var(--primary);outline-offset:1px}
+.row-action-primary{color:var(--primary-strong)}
+@media (min-width:1100px){
+  .submission-table .col-actions{width:184px}
+  .row-actions{flex-direction:row;gap:4px}
+  .row-action{width:auto;flex:1;padding:0 8px}
+}
 
 /* Penyimpanan */
 .storage-bar{display:flex;flex-direction:column;gap:8px;padding:16px 20px;margin-bottom:16px;border:1px solid var(--border);border-radius:12px;background:var(--surface);box-shadow:none}

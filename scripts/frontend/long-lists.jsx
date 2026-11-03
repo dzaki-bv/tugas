@@ -45,11 +45,12 @@ function ListMore({ list }) {
 }
 
 function SubmissionNote({ note }) {
+  const [open, setOpen] = Ye.useState(false);
   if (note.length <= NOTE_PREVIEW_CHARS) return <div className="submission-note">{note}</div>;
-  return <details className="submission-note">
-    <summary>{note.slice(0, NOTE_PREVIEW_CHARS).trimEnd()}… <span className="note-toggle">lihat catatan</span></summary>
-    <div className="submission-note-full">{note}</div>
-  </details>;
+  return <div className="submission-note">
+    <span className={open ? 'submission-note-text' : undefined}>{open ? note : `${note.slice(0, NOTE_PREVIEW_CHARS).trimEnd()}…`}</span>{' '}
+    <button type="button" className="note-toggle" aria-expanded={open} onClick={() => setOpen(value => !value)}>{open ? 'sembunyikan catatan' : 'lihat catatan'}</button>
+  </div>;
 }
 
 function ClassFilter({ classes, value, onChange }) {
@@ -68,39 +69,69 @@ function ClassFilter({ classes, value, onChange }) {
   </div>;
 }
 
-// Pengganti tabel Tepat Waktu/Terlambat (Av) dan Belum (xy) dari bundle asal.
-function Av({ rows, downloadIndex, onView, onDownload }) {
-  const list = useListWindow(rows, row => [row.student_name, row.student_class]);
-  const groups = Ye.useMemo(() => new Map(downloadIndex.map(entry => [entry.sub.id, entry.group])), [downloadIndex]);
+// Pengganti tiga section Tepat Waktu/Terlambat/Belum dari bundle asal: satu tabel dengan kolom status dan filter.
+const STATUS_ORDER = ['ontime', 'late', 'missing'];
+const WIB_DATE = new Intl.DateTimeFormat('id-ID', { timeZone: 'Asia/Jakarta', day: '2-digit', month: '2-digit' });
+const WIB_TIME = new Intl.DateTimeFormat('id-ID', { timeZone: 'Asia/Jakarta', hour: '2-digit', minute: '2-digit', hour12: false });
+
+// Waktu kiriman. Desktop: tanggal lengkap (status di kolom sendiri). Mobile: 21/10 di atas 22.00 (WIB) dengan status di bawahnya.
+function SubmissionTime({ time, status }) {
+  const date = time && new Date(time);
   return <>
-    <ListSearch list={list} label="Cari kiriman" placeholder="Cari nama atau kelas" />
-    <div className="card" style={{ padding: 0 }}><div className="table-container"><table className="submission-table">
-      <thead><tr><th>Nama</th><th>Kelas</th><th>Waktu</th><th>Aksi</th></tr></thead>
-      <tbody>{list.shown.length > 0 ? list.shown.map(row => {
-        const group = groups.get(row.id);
-        return <tr key={row.id}>
-          <td><div className="cell-clamp" title={row.student_name}>{row.student_name}</div>{row.student_note && <SubmissionNote note={row.student_note} />}</td>
-          <td><div className="cell-clamp" title={row.student_class}>{row.student_class}</div></td>
-          <td className="mono-cell">{wf(row.created_at)}</td>
-          <td>{group ? <div className="row-actions">
-            <button type="button" className="btn btn-outline btn-inline btn-sm" onClick={() => onView(group)} aria-label={`Lihat kiriman ${row.student_name}`}><Icon name="eye" size={16} />Lihat</button>
-            <button type="button" className="btn btn-inline btn-sm" onClick={() => onDownload(group)} aria-label={`Unduh kiriman ${row.student_name}`}><Icon name="download" size={16} />Unduh</button>
-          </div> : <span className="muted">—</span>}</td>
-        </tr>;
-      }) : <tr><td colSpan={4} className="text-center table-empty-cell">—</td></tr>}</tbody>
-    </table></div></div>
-    <ListMore list={list} />
+    <span className="time-full">{date ? wf(time) : <span className="muted">—</span>}</span>
+    <div className="time-compact">
+      {date && <span className="time-short mono" title={wf(time)}>
+        <span>{WIB_DATE.format(date)}</span>
+        <span>{WIB_TIME.format(date).replace(':', '.')}</span>
+      </span>}
+      <StatusChip status={status} />
+    </div>
   </>;
 }
 
-function xy({ rows, hasRoster }) {
+function SubmissionTable({ onTime, late, missing, hasRoster, downloadIndex, onView, onDownload }) {
+  const [status, setStatus] = Ye.useState('all');
+  const groups = Ye.useMemo(() => new Map(downloadIndex.map(entry => [entry.sub.id, entry.group])), [downloadIndex]);
+  const byStatus = Ye.useMemo(() => {
+    const submitted = sub => ({ key: sub.id, name: sub.student_name, className: sub.student_class, note: sub.student_note, time: sub.created_at, sub });
+    return {
+      ontime: onTime.map(sub => ({ ...submitted(sub), status: 'ontime' })),
+      late: late.map(sub => ({ ...submitted(sub), status: 'late' })),
+      missing: missing.map(row => ({ key: `missing-${row.className}-${row.name}`, name: row.name, className: row.className, status: 'missing' })),
+    };
+  }, [onTime, late, missing]);
+  const rows = Ye.useMemo(() => {
+    if (status !== 'all') return byStatus[status];
+    const sent = [...byStatus.ontime, ...byStatus.late].sort((a, b) => new Date(b.time) - new Date(a.time));
+    return [...sent, ...byStatus.missing];
+  }, [byStatus, status]);
   const list = useListWindow(rows, row => [row.name, row.className]);
+  const filters = [['all', 'Semua', byStatus.ontime.length + byStatus.late.length + byStatus.missing.length], ...STATUS_ORDER
+    .filter(key => key !== 'missing' || hasRoster)
+    .map(key => [key, STATUS_META[key].label, byStatus[key].length])];
+  const emptyText = status === 'missing' && !hasRoster ? 'Tugas tanpa target kelas' : '—';
   return <>
-    <ListSearch list={list} label="Cari siswa belum mengumpulkan" placeholder="Cari nama atau kelas" />
-    <div className="card" style={{ padding: 0 }}><div className="table-container"><table>
-      <thead><tr><th>Nama</th><th>Kelas</th></tr></thead>
-      <tbody>{list.shown.length > 0 ? list.shown.map(row => <tr key={`${row.className}-${row.name}`}><td>{row.name}</td><td>{row.className}</td></tr>)
-        : <tr><td colSpan={2} className="text-center table-empty-cell">{hasRoster ? '—' : 'Tugas tanpa target kelas'}</td></tr>}</tbody>
+    <div className="class-filter-bar status-filter" role="group" aria-label="Filter status">
+      {filters.map(([key, label, count]) => <button type="button" key={key} className={`class-filter-btn${status === key ? ' active' : ''}`} aria-pressed={status === key} onClick={() => setStatus(key)}>
+        {label} <span className="status-filter-count mono">{count}</span>
+      </button>)}
+    </div>
+    <ListSearch list={list} label="Cari siswa" placeholder="Cari nama atau kelas" />
+    <div className="card" style={{ padding: 0 }}><div className="table-container"><table className="submission-table">
+      <thead><tr><th className="col-name">Nama</th><th className="col-class">Kelas</th><th className="col-status">Status</th><th className="col-time">Waktu</th><th className="col-actions">Aksi</th></tr></thead>
+      <tbody>{list.shown.length > 0 ? list.shown.map(row => {
+        const group = row.sub && groups.get(row.sub.id);
+        return <tr key={row.key}>
+          <td><div className="cell-clamp" title={row.name}>{row.name}</div>{row.note && <SubmissionNote note={row.note} />}</td>
+          <td><div className="cell-clamp" title={row.className}>{row.className}</div></td>
+          <td className="col-status"><StatusChip status={row.status} /></td>
+          <td className="mono-cell"><SubmissionTime time={row.time} status={row.status} /></td>
+          <td>{group ? <div className="row-actions">
+            <button type="button" className="row-action" onClick={() => onView(group)} aria-label={`Lihat kiriman ${row.name}`}><Icon name="eye" size={16} />Lihat</button>
+            <button type="button" className="row-action row-action-primary" onClick={() => onDownload(group)} aria-label={`Unduh kiriman ${row.name}`}><Icon name="download" size={16} />Unduh</button>
+          </div> : <span className="muted">—</span>}</td>
+        </tr>;
+      }) : <tr><td colSpan={5} className="text-center table-empty-cell">{emptyText}</td></tr>}</tbody>
     </table></div></div>
     <ListMore list={list} />
   </>;
